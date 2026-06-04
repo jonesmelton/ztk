@@ -1,0 +1,6 @@
+(library
+ (name test_zet)
+ (inline_tests)
+ (libraries zet bonsai bonsai_term bonsai_term_test bonsai_test core)
+ (preprocess
+  (pps ppx_jane bonsai.ppx_bonsai)))

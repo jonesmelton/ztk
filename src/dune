@@ -1,0 +1,5 @@
+(library
+ (name zet)
+ (libraries async bonsai bonsai_term core)
+ (preprocess
+  (pps ppx_jane bonsai.ppx_bonsai)))

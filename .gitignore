@@ -1,0 +1,20 @@
+# reference clones (read-only upstream source)
+references/
+
+# dune / ocaml build artifacts
+_build/
+*.install
+*.merlin
+.merlin
+*.cmi
+*.cmo
+*.cmx
+*.cmt
+*.cmti
+*.o
+*.a
+*.so
+*.exe
+
+# expect-test leftovers
+*.corrected
