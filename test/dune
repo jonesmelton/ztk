@@ -1,6 +1,9 @@
 (library
  (name test_zet)
- (inline_tests)
+ (inline_tests
+  (deps
+   (file ../db/schema.sql)
+   (file ../db/seed.sql)))
  (libraries zet bonsai bonsai_term bonsai_term_test bonsai_test core)
  (preprocess
   (pps ppx_jane bonsai.ppx_bonsai)))

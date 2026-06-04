@@ -18,3 +18,6 @@ _build/
 
 # expect-test leftovers
 *.corrected
+
+# fixture DB (rebuilt from db/schema.sql + db/seed.sql)
+db/*.db
