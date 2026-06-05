@@ -31,15 +31,58 @@ module Fts_query = struct
     | _ -> false
   ;;
 
-  let sanitize raw =
+  (* The cleaned, non-empty query words — the exact basis the sanitizer turns into prefix
+     phrases. Highlighting reuses these so what's emphasized matches what was searched. *)
+  let tokens raw =
     raw
     |> String.split_on_chars ~on:[ ' '; '\t'; '\n'; '\r' ]
     |> List.filter_map ~f:(fun token ->
       let cleaned = String.filter token ~f:(fun c -> not (is_special c)) in
-      if String.is_empty cleaned then None else Some (Printf.sprintf "\"%s\"*" cleaned))
+      if String.is_empty cleaned then None else Some cleaned)
+  ;;
+
+  let sanitize raw =
+    tokens raw
+    |> List.map ~f:(fun t -> Printf.sprintf "\"%s\"*" t)
     |> String.concat ~sep:" "
   ;;
 end
+
+(* Split [line] into maximal runs of "word" vs "non-word" characters, where a word char is
+   alphanumeric. Each run keeps its text; the boolean says whether it's a word. Used by
+   highlighting to test whole words against query-term prefixes without splitting words. *)
+let word_runs line =
+  let is_word c = Char.is_alphanum c in
+  String.to_list line
+  |> List.group ~break:(fun a b -> Bool.( <> ) (is_word a) (is_word b))
+  |> List.map ~f:(fun chars ->
+    let s = String.of_char_list chars in
+    ( s
+    , match chars with
+      | c :: _ -> is_word c
+      | [] -> false ))
+;;
+
+(* Render [line] as a [View.t], emphasizing words that match the search. A word matches
+   when its lowercased form starts with any of [terms] (already lowercased), mirroring the
+   FTS5 prefix-* semantics the search uses. Non-matching text keeps [base] attrs; matches
+   get a yellow bold overlay. With no terms this is just [View.text ~attrs:base line]. *)
+let highlight ~terms ~base line =
+  match terms with
+  | [] -> View.text ~attrs:base line
+  | _ ->
+    let hit = [ Attr.fg Attr.Color.Expert.yellow; Attr.bold ] in
+    word_runs line
+    |> List.map ~f:(fun (text, is_word) ->
+      let matched =
+        is_word
+        &&
+        let lower = String.lowercase text in
+        List.exists terms ~f:(fun t -> String.is_prefix lower ~prefix:t)
+      in
+      View.text ~attrs:(if matched then hit else base) text)
+    |> View.hcat
+;;
 
 module Mode = struct
   type t =
@@ -305,19 +348,23 @@ let detail_body_lines ~width body =
   String.split_lines body |> List.concat_map ~f:(wrap_line ~width)
 ;;
 
-(* One row in the list pane: cursor-highlighted note label. *)
-let render_list_row ~width ~is_selected (note : Db.Note.t) =
+(* One row in the list pane: a selection marker + the note label, with search terms
+   emphasized. The label is truncated to the pane width first, so highlighting runs over
+   exactly what's drawn (and the marker stays plain). *)
+let render_list_row ~terms ~width ~is_selected (note : Db.Note.t) =
   let marker = if is_selected then "> " else "  " in
-  let label = Printf.sprintf "%s%s" marker (Db.Note.display_title note) in
+  let title = Db.Note.display_title note in
   let label =
-    if String.length label > width then String.prefix label (Int.max 0 width) else label
+    let full = marker ^ title in
+    if String.length full > width then String.prefix full (Int.max 0 width) else full
   in
-  let attrs = if is_selected then [ Attr.fg accent; Attr.bold ] else [] in
-  View.text ~attrs label
+  let base = if is_selected then [ Attr.fg accent; Attr.bold ] else [] in
+  highlight ~terms ~base label
 ;;
 
 let render_list
   ?(empty_label = "(no notes)")
+  ?(terms = [])
   ~width
   ~height
   ~cursor
@@ -337,7 +384,7 @@ let render_list
       in
       let rows =
         List.mapi visible ~f:(fun i note ->
-          render_list_row ~width ~is_selected:(scroll_off + i = cursor) note)
+          render_list_row ~terms ~width ~is_selected:(scroll_off + i = cursor) note)
       in
       View.vcat rows
   in
@@ -369,7 +416,7 @@ let detail_max_scroll ~width ~height (note : Db.Note.t option) =
 
 (* Detail pane: fixed header (title/slug/kind/date) + scrollable, word-wrapped body. The
    body is sliced by [scroll] (a wrapped-line offset) to the rows left under the header. *)
-let render_detail ~width ~height ~scroll (note : Db.Note.t option) =
+let render_detail ?(terms = []) ~width ~height ~scroll (note : Db.Note.t option) =
   let content =
     match note with
     | None -> View.text ~attrs:[ Attr.fg dim ] "(no note selected)"
@@ -386,7 +433,10 @@ let render_detail ~width ~height ~scroll (note : Db.Note.t option) =
       in
       let header =
         View.vcat
-          (View.text ~attrs:[ Attr.fg accent; Attr.bold ] (Db.Note.display_title note)
+          (highlight
+             ~terms
+             ~base:[ Attr.fg accent; Attr.bold ]
+             (Db.Note.display_title note)
            :: List.map meta ~f:(fun line -> View.text ~attrs:[ Attr.fg dim ] line))
       in
       let all_body = detail_body_lines ~width note.body in
@@ -399,8 +449,7 @@ let render_detail ~width ~height ~scroll (note : Db.Note.t option) =
           ~pos:scroll
           ~len:(Int.min body_rows (Int.max 0 (total - scroll)))
       in
-      View.vcat
-        (header :: View.text "" :: List.map visible ~f:(fun line -> View.text line))
+      View.vcat (header :: View.text "" :: List.map visible ~f:(highlight ~terms ~base:[]))
   in
   fit ~width ~height content
 ;;
@@ -505,6 +554,13 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     let selected = List.nth active model.cursor in
     let list_focused = [%equal: Focus.t] model.focus List in
     let searching = [%equal: Mode.t] model.mode Search in
+    (* Terms to emphasize: the query words, lowercased, only while searching. Empty in
+       browse, so [highlight] is a no-op there. *)
+    let terms =
+      if searching
+      then Fts_query.tokens model.editor.buf |> List.map ~f:String.lowercase
+      else []
+    in
     (* The border box lays [title] into the top edge as-is (no truncation), so callers
        must size it to the pane — [list_title ~budget] does that for the search query. The
        [╭ ] prefix and trailing [ ─╮] consume ~4 cols; the [<tab>] hint (shown on the
@@ -526,6 +582,7 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
         ~title:(list_title ~budget:(list_w - 4 - tab_cols) model)
         (render_list
            ~empty_label:(if searching then "(no matches)" else "(no notes)")
+           ~terms
            ~width:list_w
            ~height:pane_h
            ~cursor:model.cursor
@@ -536,6 +593,7 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
         ~focused:(not list_focused)
         ~title:"Detail"
         (render_detail
+           ~terms
            ~width:detail_w
            ~height:pane_h
            ~scroll:model.detail_scroll

@@ -500,3 +500,36 @@ let%expect_test "garbage query does not crash the search" =
     └──────────────────────────────────────────────────────┘
     |}]
 ;;
+
+(* An ANSI-rendering handle: [Handle.show] on it surfaces color/style escapes (visualized
+   as markers) instead of stripping them, so highlight spans are visible to the snapshot.
+   The dumb-cap [notes_handle] above can't see them. *)
+let ansi_handle ?initial_dimensions () =
+  let db = seeded_db () in
+  Bonsai_term_test.create_handle
+    ?initial_dimensions
+    ~capability:Bonsai_term_test.Capability.Ansi
+    (Zet.app ~db)
+;;
+
+(* Matched query terms are emphasized wherever they appear, by prefix and
+   case-insensitively: "oc" highlights "OCaml" in both the list row and the detail header.
+   Rendered with the ANSI cap so the styled runs show up as escape markers. *)
+let%expect_test "search highlights matched terms in list and detail" =
+  let handle = ansi_handle ~initial_dimensions:{ width = 54; height = 9 } () in
+  Bonsai_term_test.send_event handle (key (ASCII '/'));
+  type_string handle "oc";
+  Handle.show handle;
+  [%expect
+    {|
+    (off fg:cyan)╭(off fg:cyan +bold) Search: oc▏ (off fg:cyan)──────(off fg:cyan)╮(off fg:gray)╭(off fg:gray +bold) Detail <tab> (off fg:gray)─────────────────(off fg:gray)╮
+    (off fg:cyan)│(off fg:cyan +bold)> (off fg:yellow +bold)OCaml(off fg:cyan +bold) (off fg:cyan +bold)type(off fg:cyan +bold) (off fg:cyan +bold)system(off fg:cyan)│(off fg:gray)│(off fg:yellow +bold)OCaml(off fg:cyan +bold) (off fg:cyan +bold)type(off fg:cyan +bold) (off fg:cyan +bold)system(off fg:gray)              (off fg:gray)│
+    (off fg:cyan)│(off)  (off)Morning(off) (off)pages(off fg:cyan)    (off fg:cyan)│(off fg:gray)│(off fg:gray)#2  note(off fg:gray)                       (off fg:gray)│
+    (off fg:cyan)│(off fg:cyan)                   (off fg:cyan)│(off fg:gray)│(off fg:gray)slug: ocaml-notes(off fg:gray)              (off fg:gray)│
+    (off fg:cyan)│(off fg:cyan)                   (off fg:cyan)│(off fg:gray)│(off fg:gray)date: 2026-06-01(off fg:gray)               (off fg:gray)│
+    (off fg:cyan)│(off fg:cyan)                   (off fg:cyan)│(off fg:gray)│(off fg:gray)                               (off fg:gray)│
+    (off fg:cyan)│(off fg:cyan)                   (off fg:cyan)│(off fg:gray)│(off)Notes(off) (off)on(off) (off)the(off) (off fg:yellow +bold)OCaml(off) (off)module(off fg:gray)      (off fg:gray)│
+    (off fg:cyan)│(off fg:cyan)                   (off fg:cyan)│(off fg:gray)│(off)system(off) (off)and(off) (off)functors(off).(off fg:gray)           (off fg:gray)│
+    (off fg:cyan)╰(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)╯(off fg:gray)╰(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)╯(off)
+    |}]
+;;
