@@ -38,8 +38,9 @@ see `decisions.md`. For working conventions, see `CLAUDE.md`.
   - Concrete bite already hit: `Bonsai_term_test.print_view` / `last_view` exist
     in the `130.100+614` clone but **not** in installed `130.91+190`. The working
     snapshot idiom is `open Bonsai_test` + `Handle.show handle` (see Phase 0).
-- **No SQLite OCaml binding installed yet.** Data layer will use
-  `caqti` + `caqti-async` + `caqti-driver-sqlite3` (to be added).
+- **Data layer uses synchronous `sqlite3_utils`** (over the `sqlite3` bindings;
+  both installed). The planned `caqti-async` was dropped — see Phase 1 below and
+  `decisions.md`. `caqti` is *not* installed.
 - Reference repos cloned under `references/` (gitignored): `bonsai_term`,
   `bonsai_term_examples`, `bonsai_term_components`, `bonsai_term_test`,
   `strace_ui`, `proctopus`. **`strace_ui` is the structural template** — it is a
@@ -118,14 +119,32 @@ below were forced by the installed library version — see the ⚠️ notes inli
 real snapshot, binary runs. ✅ build + runtest green; live render is the only
 open item (human to confirm).
 
-### Phase 1 — Data layer (caqti-async + FTS5)
+### Phase 1 — Data layer (sqlite3_utils + FTS5) — DONE ✅ (2026-06-04)
 
-Goal: a typed, async query module over the existing DB. No UI yet; tested in
-isolation.
+Goal: a typed query module over the existing DB. No UI yet; tested in isolation.
 
-1. Add deps: `caqti`, `caqti-async`, `caqti-driver-sqlite3`. **Verify they build
-   on the OxCaml 5.2 switch** — treat "one query runs" as an explicit gate;
-   caqti pulls transitive deps and OxCaml can have pinning quirks.
+**Pivot from the original plan:** this phase was specced for `caqti-async`, but
+caqti was never installed and the Phase-0 wiring already used **synchronous
+`sqlite3_utils`** (a high-level typed wrapper over the `sqlite3` bindings, both
+present on the switch). We stayed sync rather than taking on caqti's transitive
+deps + OxCaml pinning risk for v1. The TUI is single-writer and reads are fast,
+so blocking the Async loop on a query is acceptable; bridge to Async at the call
+site later if a query ever gets slow. Decision recorded in `decisions.md`.
+
+**What shipped:** `src/db.ml` typed queries — `list_all`, `list_recent ~limit`,
+`get_by_id`, `get_by_slug`, `search ~query ?kind ~limit` (FTS5 `MATCH`, ranked),
+`tags_of` and `filter_by_tag ~tag` (both via `json_each(metadata,'$.tags')` so
+read/filter tag semantics can't diverge). All note-returning queries share one
+`note_row` decoder over a fixed 7-column order. SQL is lowercase, river style,
+leading commas (user preference). `db/seed.sql` expanded to 4 notes across all
+three kinds + an untagged/null-metadata row; `test/test_zet.ml` has expect tests
+for every query (ordering, kind filter, FTS ranking, empty-tags, missing-id).
+`dune build` + `dune runtest` green.
+
+Original recipe (kept for reference; replace caqti steps with the above):
+
+1. ~~Add deps: `caqti`, `caqti-async`, `caqti-driver-sqlite3`.~~ Superseded —
+   used installed `sqlite3` + `sqlite3_utils` instead.
 2. `Db` module:
    - Connection open (single-writer; plain open, no WAL gymnastics needed).
    - `Note.t` record mirroring the `notes` row (id, slug, kind, title, body,

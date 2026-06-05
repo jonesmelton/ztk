@@ -81,10 +81,16 @@ routing. Its shape:
 
 ## Data layer decisions
 
-- **SQLite via `caqti` + `caqti-async` + `caqti-driver-sqlite3`** (typed queries,
-  first-class Async driver — clean fit for bonsai_term's Async loop). Not yet
-  installed; must be added and **verified building on the OxCaml 5.2 switch**
-  (gate it: caqti pulls transitive deps; OxCaml can have pinning quirks).
+- **SQLite via synchronous `sqlite3_utils`** (a typed, high-level wrapper over
+  the `sqlite3` bindings; both already installed on the switch). *Originally*
+  specced as `caqti` + `caqti-async` + `caqti-driver-sqlite3`, but caqti was
+  never installed and pulls a large transitive-dep tree with OxCaml pinning
+  risk. We pivoted to sync (2026-06-04). Rationale: single-writer, read-mostly,
+  small corpus — queries are fast and blocking the Async render loop briefly is
+  acceptable for v1. `sqlite3_utils`' `Ty` combinators give the same typed-query
+  ergonomics caqti would have. If a query ever gets slow, bridge it to Async at
+  the call site (`In_thread.run`) rather than rewriting the data layer. Queries
+  are written lowercase, river-aligned, leading commas (`src/db.ml`).
 - **Single-writer assumption.** The TUI and any external editor are never writing
   the DB concurrently. So: no WAL-mode gymnastics, no conflict handling. Plain
   connection open. Metadata edits use partial `UPDATE ... SET metadata = ?`
@@ -104,6 +110,15 @@ notes_fts  -- FTS5, content='notes', content_rowid='id', columns (title, body)
 ```
 
 Key facts derived from the schema:
+- **`slug` and `title` are NULLABLE.** In the real corpus ~76% of notes (the
+  untitled journal entries) have NULL `slug` *and* NULL `title`; `kind`/`body`
+  are always present. So `Note.t` models `slug : string option` and
+  `title : string option`. `Note.display_title` gives a non-empty label (title →
+  entry_date → `#id`) for lists/headers. **Incident (2026-06-04):** the original
+  `note_row` decoder + fixture schema wrongly assumed these were NOT NULL, so
+  bare `zet` crashed with `Sqlite3_utils.Type_error` on the first real journal
+  row. Fixed; fixture schema (`db/schema.sql`) relaxed to match reality and the
+  seed now includes a NULL-slug/title row so tests cover it.
 - **FTS is external-content + trigger-synced.** Search =
   `SELECT n.* FROM notes_fts f JOIN notes n ON n.id = f.rowid
    WHERE notes_fts MATCH ? ORDER BY rank`. Because writes go through `notes`,
@@ -112,6 +127,29 @@ Key facts derived from the schema:
   `json_each` (parsed per query, not indexed) — fine for v1.
 - **There is NO links/edges table.** Inter-note links are not first-class in the
   schema. See deferred items.
+
+---
+
+## CLI surface: every TUI feature has a headless subcommand mirror
+
+zet is a **dual interface** — the TUI *and* a complete headless CLI. The rule
+(user's call, 2026-06-04): any capability exposed in the TUI must also have a
+scriptable subcommand, so the whole tool is usable without the terminal UI.
+
+- Top-level `zet` is a `Command.group`. Bare `zet` (no subcommand) launches the
+  TUI on the default db via the group's `?body` (sync — it boots the Async
+  scheduler with `Thread_safe.block_on_async`). `zet tui [-db PATH]` is the
+  explicit, flag-taking form.
+- **Core's `Command` can't make one command both take flags and host
+  subcommands** — that's why bare `zet` is default-db-only and `-db` requires
+  the explicit `tui` subcommand. Don't try to "fix" this; it's a Command limit.
+- Headless mirrors are plain `Command.basic` commands that call the same `Db`
+  functions and print results via `Zet.print_notes` (stable
+  `id<TAB>slug<TAB>kind<TAB>title`, one per line — greppable). First one shipped:
+  `zet search QUERY [-kind ...] [-limit ...]`.
+- **When adding a feature, add its subcommand as a peer in the group** (and an
+  expect test for the output format). As this grows, extract the headless
+  commands into a `Cli` module; in `zet.ml` for now while small.
 
 ---
 

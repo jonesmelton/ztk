@@ -1,52 +1,52 @@
 -- zet schema (authoritative; mirrors docs/decisions.md).
--- Single-writer assumption: plain connection, no WAL gymnastics.
+-- single-writer assumption: plain connection, no WAL gymnastics.
 
-CREATE TABLE IF NOT EXISTS notes (
-  id          INTEGER PRIMARY KEY,
-  slug        TEXT UNIQUE NOT NULL,
-  kind        TEXT NOT NULL CHECK (kind IN ('journal','note','inbox')),
-  title       TEXT NOT NULL,
-  body        TEXT NOT NULL,
-  entry_date  TEXT,
-  metadata    TEXT,            -- JSON, e.g. {"tags":[...]}
-  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+create table if not exists notes (
+  id          integer primary key,
+  slug        text unique,     -- nullable: untitled journal entries have none
+  kind        text not null check (kind in ('journal','note','inbox')),
+  title       text,            -- nullable: untitled journal entries have none
+  body        text not null,
+  entry_date  text,
+  metadata    text,            -- JSON, e.g. {"tags":[...]}
+  created_at  text not null default (datetime('now')),
+  updated_at  text not null default (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS assets (
-  id          INTEGER PRIMARY KEY,
-  filename    TEXT UNIQUE NOT NULL,
-  mime_type   TEXT,
-  size_bytes  INTEGER,
-  note_id     INTEGER REFERENCES notes(id),
-  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+create table if not exists assets (
+  id          integer primary key,
+  filename    text unique not null,
+  mime_type   text,
+  size_bytes  integer,
+  note_id     integer references notes(id),
+  created_at  text not null default (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS note_assets (
-  note_id   INTEGER NOT NULL REFERENCES notes(id),
-  asset_id  INTEGER NOT NULL REFERENCES assets(id),
-  PRIMARY KEY (note_id, asset_id)
+create table if not exists note_assets (
+  note_id   integer not null references notes(id),
+  asset_id  integer not null references assets(id),
+  primary key (note_id, asset_id)
 );
 
 -- FTS5 external-content index over notes(title, body), kept in sync by triggers.
-CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5 (
+create virtual table if not exists notes_fts using fts5 (
   title,
   body,
   content='notes',
   content_rowid='id'
 );
 
-CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes BEGIN
-  INSERT INTO notes_fts (rowid, title, body) VALUES (new.id, new.title, new.body);
-END;
+create trigger if not exists notes_ai after insert on notes begin
+  insert into notes_fts (rowid, title, body) values (new.id, new.title, new.body);
+end;
 
-CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes BEGIN
-  INSERT INTO notes_fts (notes_fts, rowid, title, body)
-    VALUES ('delete', old.id, old.title, old.body);
-END;
+create trigger if not exists notes_ad after delete on notes begin
+  insert into notes_fts (notes_fts, rowid, title, body)
+       values ('delete', old.id, old.title, old.body);
+end;
 
-CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
-  INSERT INTO notes_fts (notes_fts, rowid, title, body)
-    VALUES ('delete', old.id, old.title, old.body);
-  INSERT INTO notes_fts (rowid, title, body) VALUES (new.id, new.title, new.body);
-END;
+create trigger if not exists notes_au after update on notes begin
+  insert into notes_fts (notes_fts, rowid, title, body)
+       values ('delete', old.id, old.title, old.body);
+  insert into notes_fts (rowid, title, body) values (new.id, new.title, new.body);
+end;

@@ -1,5 +1,5 @@
 (library
  (name zet)
- (libraries async bonsai bonsai_term core sqlite3 sqlite3_utils)
+ (libraries async bonsai bonsai_term core core_unix sqlite3 sqlite3_utils)
  (preprocess
   (pps ppx_jane bonsai.ppx_bonsai)))
