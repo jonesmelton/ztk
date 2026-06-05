@@ -16,6 +16,8 @@ see `decisions.md`. For working conventions, see `CLAUDE.md`.
 - **Phase 1 complete** (2026-06-04). Typed sqlite3_utils data layer. See below.
 - **Phase 2 complete** (2026-06-04). Read-only two-pane browse UI + headless CLI
   mirrors (`list`/`show`/`search`). See "Phase 2 — DONE" below.
+- **Phase 3 complete** (2026-06-05). Inline FTS search UX in the TUI. See
+  "Phase 3 — DONE" below.
 - Toolchain: opam switch `5.2.0+ox` (OxCaml), `core` / `async` /
   `ppx_jane` at `v0.18~preview.130.91+190`. `sqlite3` CLI present at
   `/opt/homebrew/opt/sqlite/bin/sqlite3`.
@@ -218,13 +220,55 @@ Original recipe (for reference; the shipped form differs as noted above):
    around the key handler).
 5. Snapshot tests: drive keystrokes (`send_event`), assert the rendered screen.
 
-### Phase 3 — FTS search UX
+### Phase 3 — FTS search UX — DONE ✅ (2026-06-05)
 
-1. `filter_editor`-style inline input (lift `filter_editor.ml` from strace_ui;
-   it already has emacs-ish line editing: kill-to-end, word-motion, etc.).
-2. Debounce/recompute the result set incrementally on query change (Bonsai
-   incrementality — only re-query when the query string actually changes).
-3. Show match ranking; optionally highlight. Snapshot-test the search flow.
+Goal: inline full-text search inside the TUI, at parity with the `zet search` CLI.
+
+**What shipped** (`src/zet.ml`): `/` toggles the list pane into Search mode — the
+pane's contents become live ranked FTS5 results, the query echoes in the pane
+title with a cursor marker (▏), and Esc returns to the full browse corpus. The
+detail pane is unchanged: Enter hands keyboard focus to the result list, and
+selecting a match shows it exactly as in browse. Key pieces:
+
+- **`Fts_query.sanitize`** — pure function turning live keystrokes into a
+  guaranteed-valid FTS5 `MATCH` (each whitespace token stripped of FTS5-special
+  chars, re-quoted as a `"tok"*` prefix phrase; all-empty → `""`). So a
+  half-typed query (lone quote, bare `-`, trailing operator) can never raise an
+  FTS5 syntax error. The headless `search` subcommand keeps **raw** FTS5 syntax —
+  this sanitizer is only for the live box. Unit-tested directly.
+- **Live handle** — `app` now takes `~db:Db.t` (was a snapshot `~notes` list) and
+  keeps the connection open for the app's lifetime (`launch_tui` brackets the
+  whole `Bonsai_term.start` run with `Async.Monitor.protect`, closing after the
+  run's deferred resolves). Browse corpus loaded once via `Db.list_all`.
+- **Reactive results** — query derived from `model.editor.buf`, `Bonsai.cutoff`
+  on `String.equal` to skip redundant queries, then `Db.search` inside a `let%arr`
+  (sync call is fine; corpus is small). No time-debounce (deferred; flag if laggy).
+- **Mode + emacs editing** — `Model` gained `mode : Browse | Search` and an
+  `Editor.{ buf; cursor }`; `Action` gained the editing set lifted from strace_ui's
+  `filter_editor` (`Insert`/`Backspace`/`Delete_forward`/`Kill_to_end`/
+  `Kill_word_backward`/`Move_*`). The reducer (`apply_action_pure`) edits the
+  buffer purely.
+
+**Key architecture note — routing moved into the reducer.** A single global
+handler that branches on a captured `model.mode` is **stale by one event** under
+this stack: `Bonsai_test.do_actions` (and the real notty loop between frames)
+invokes the handler value from the *last view recompute*, so a burst of keys
+right after `/` would be routed by the still-`Browse` handler and dropped. Fix:
+the handler forwards the raw `Event.t`, and a pure `route : Model.t -> Event.t ->
+Action.t option` does all mode/focus routing **inside `set_model`**, reading the
+live model. This is the load-bearing subtlety for anyone touching key handling.
+
+**Known deviations / deferred:**
+- **List-pane title truncation is column-windowed, not byte-truncated** — the
+  search query window scrolls horizontally to keep the cursor visible and never
+  splits the multibyte marker (an earlier byte-prefix truncation produced a `�`).
+  Still no detail-pane-style wrap; titles are single-line by design.
+- **No match highlighting** in results (plan listed it optional — deferred).
+- **No time-debounce** — per-keystroke re-query; revisit only if it feels laggy
+  on the real corpus. **Flag for the human:** snapshots verify layout + logic, not
+  live-search *feel* (snappiness, prefix-match feel while typing).
+- Raw-FTS5-operator entry in the live box is intentionally traded away for the
+  no-crash sanitizer; `zet search` remains the raw-syntax escape hatch.
 
 ### Phase 4 — Metadata editing (tags)
 

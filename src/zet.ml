@@ -15,20 +15,72 @@ module Focus = struct
   [@@deriving sexp_of, equal]
 end
 
-module Model = struct
+(* Turns arbitrary live keystrokes into a guaranteed-valid FTS5 MATCH expression, so a
+   half-typed query (a lone quote, a trailing operator, a bare '-') can never raise an
+   FTS5 syntax error mid-search. Each whitespace-separated token is stripped of
+   FTS5-special characters, then re-emitted as a quoted phrase with a trailing [*] for
+   prefix matching — so "oc ca" becomes [ "oc"* "ca"* ]. Tokens left empty after stripping
+   are dropped; an all-empty input yields [""], which the caller treats as "no query"
+   (empty result set) rather than calling [Db.search]. The headless [search] subcommand
+   keeps raw FTS5 syntax; this is only for the live TUI box. *)
+module Fts_query = struct
+  (* FTS5 treats these as syntax: quotes, parens, the prefix star, column filter, the NOT
+     operator, and the NEAR caret. Strip them so a token is always an inert bareword. *)
+  let is_special = function
+    | '"' | '(' | ')' | '*' | ':' | '-' | '^' -> true
+    | _ -> false
+  ;;
+
+  let sanitize raw =
+    raw
+    |> String.split_on_chars ~on:[ ' '; '\t'; '\n'; '\r' ]
+    |> List.filter_map ~f:(fun token ->
+      let cleaned = String.filter token ~f:(fun c -> not (is_special c)) in
+      if String.is_empty cleaned then None else Some (Printf.sprintf "\"%s\"*" cleaned))
+    |> String.concat ~sep:" "
+  ;;
+end
+
+module Mode = struct
   type t =
-    { cursor : int
-    ; focus : Focus.t
-    ; detail_scroll : int (* top line offset of the detail body, in wrapped lines *)
+    | Browse
+    | Search
+  [@@deriving sexp_of, equal]
+end
+
+(* The live query line: [buf] is the raw text, [cursor] a byte offset into it (0..len).
+   The buffer is the single source of truth for the query — the result set is derived from
+   it, so there is no separate query state to keep in sync. *)
+module Editor = struct
+  type t =
+    { buf : string
+    ; cursor : int
     }
   [@@deriving sexp_of, equal]
 
-  let initial = { cursor = 0; focus = List; detail_scroll = 0 }
+  let empty = { buf = ""; cursor = 0 }
+end
+
+module Model = struct
+  type t =
+    { cursor : int (* selection index into the *active* list (browse corpus or results) *)
+    ; focus : Focus.t
+    ; detail_scroll : int (* top line offset of the detail body, in wrapped lines *)
+    ; mode : Mode.t
+    ; editor : Editor.t
+    }
+  [@@deriving sexp_of, equal]
+
+  let initial =
+    { cursor = 0; focus = List; detail_scroll = 0; mode = Browse; editor = Editor.empty }
+  ;;
 end
 
 module Action = struct
   (* [Up]/[Down]/[Top]/[Bottom] are routed by pane focus: they move the list cursor when
-     the list is focused, and scroll the detail body when the detail pane is focused. *)
+     the list is focused, and scroll the detail body when the detail pane is focused. The
+     [Search_*] / editing variants only fire while [mode = Search]; the emacs editing set
+     is lifted from strace_ui's filter_editor. *)
   type t =
     | Up
     | Down
@@ -36,35 +88,168 @@ module Action = struct
     | Bottom
     | Toggle_focus
     | Focus_detail
+    | Start_search (* [/] in Browse: enter Search, fresh empty query *)
+    | Exit_search (* Esc in Search: back to Browse, clear query *)
+    | Insert of char
+    | Backspace
+    | Delete_forward
+    | Move_left
+    | Move_right
+    | Move_to_start
+    | Move_to_end
+    | Kill_to_end
+    | Kill_word_backward
   [@@deriving sexp_of]
 end
+
+(* Map a raw key to an action *given the current mode*. Routing lives here — not in the
+   Bonsai handler — so it reads the live model inside [set_model] rather than a handler
+   value that's only as fresh as the last view recompute. (A burst of keys between frames,
+   e.g. typing right after [/], would otherwise be routed by a stale mode.) Returns [None]
+   for keys with no binding in the current mode. *)
+let route (model : Model.t) (event : Event.t) : Action.t option =
+  match model.mode with
+  (* Search mode captures the keyboard for editing the query line. Esc leaves search;
+     Enter commits — it hands focus to the list so you can navigate results, query still
+     applied. The emacs editing set is lifted from strace_ui's filter_editor. *)
+  | Search ->
+    (match event with
+     | Key_press { key = Escape; mods = _ } -> Some Exit_search
+     | Key_press { key = Enter; mods = _ } -> Some Toggle_focus
+     | Key_press { key = Backspace; mods = _ } -> Some Backspace
+     | Key_press { key = Delete; mods = _ }
+     | Key_press { key = ASCII 'D'; mods = [ Ctrl ] } -> Some Delete_forward
+     | Key_press { key = ASCII 'A'; mods = [ Ctrl ] } | Key_press { key = Home; mods = _ }
+       -> Some Move_to_start
+     | Key_press { key = ASCII 'E'; mods = [ Ctrl ] } | Key_press { key = End; mods = _ }
+       -> Some Move_to_end
+     | Key_press { key = ASCII 'K'; mods = [ Ctrl ] } -> Some Kill_to_end
+     | Key_press { key = ASCII 'W'; mods = [ Ctrl ] } -> Some Kill_word_backward
+     | Key_press { key = ASCII 'B'; mods = [ Ctrl ] }
+     | Key_press { key = Arrow `Left; mods = [] } -> Some Move_left
+     | Key_press { key = ASCII 'F'; mods = [ Ctrl ] }
+     | Key_press { key = Arrow `Right; mods = [] } -> Some Move_right
+     | Key_press { key = ASCII 'N'; mods = [ Ctrl ] }
+     | Key_press { key = Arrow `Down; mods = [] } -> Some Down
+     | Key_press { key = ASCII 'P'; mods = [ Ctrl ] }
+     | Key_press { key = Arrow `Up; mods = [] } -> Some Up
+     | Key_press { key = ASCII c; mods = [] } -> Some (Insert c)
+     | _ -> None)
+  | Browse ->
+    (match event with
+     | Key_press { key = ASCII '/'; mods = [] } -> Some Start_search
+     | Key_press { key = Tab; mods = _ } -> Some Toggle_focus
+     | Key_press { key = ASCII 'N'; mods = [ Ctrl ] }
+     | Key_press { key = Arrow `Down; mods = [] } -> Some Down
+     | Key_press { key = ASCII 'P'; mods = [ Ctrl ] }
+     | Key_press { key = Arrow `Up; mods = [] } -> Some Up
+     | Key_press { key = ASCII 'A'; mods = [ Ctrl ] } -> Some Top
+     | Key_press { key = ASCII 'E'; mods = [ Ctrl ] } -> Some Bottom
+     | Key_press { key = Enter; mods = [] } -> Some Focus_detail
+     | _ -> None)
+;;
 
 (* Pure reducer. [count] is the corpus size and [detail_max] the largest valid detail
    scroll offset for the selected note; both are threaded in so motion can clamp without
    the model carrying the notes or their wrapped geometry. Moving the list cursor resets
    the detail scroll, since a new note's body starts at the top. *)
+(* Emacs-style backward word boundary from [cursor] in [buf]: skip trailing spaces, then
+   skip the word, returning the offset where the word starts. Lifted from strace_ui's
+   filter_editor. *)
+let word_boundary_backward buf cursor =
+  let is_space i = Char.equal buf.[i] ' ' in
+  let i = ref cursor in
+  while !i > 0 && is_space (!i - 1) do
+    decr i
+  done;
+  while !i > 0 && not (is_space (!i - 1)) do
+    decr i
+  done;
+  !i
+;;
+
+(* Any edit to the query buffer re-selects from the top of the (new) result set, so cursor
+   and detail scroll reset to 0. The list selection index and the edit-line cursor are
+   different things; only the latter changes here. *)
+let edit_query (model : Model.t) ~f : Model.t =
+  { model with editor = f model.editor; cursor = 0; detail_scroll = 0 }
+;;
+
 let apply_action_pure ~count ~detail_max (model : Model.t) (action : Action.t) : Model.t =
   let last = Int.max 0 (count - 1) in
   let clamp_cursor i = Int.clamp_exn i ~min:0 ~max:last in
   let clamp_scroll i = Int.clamp_exn i ~min:0 ~max:(Int.max 0 detail_max) in
   let move_cursor c = { model with cursor = clamp_cursor c; detail_scroll = 0 } in
-  match model.focus, action with
-  | Detail, Up -> { model with detail_scroll = clamp_scroll (model.detail_scroll - 1) }
-  | Detail, Down -> { model with detail_scroll = clamp_scroll (model.detail_scroll + 1) }
-  | Detail, Top -> { model with detail_scroll = 0 }
-  | Detail, Bottom -> { model with detail_scroll = clamp_scroll detail_max }
-  | List, Up -> move_cursor (model.cursor - 1)
-  | List, Down -> move_cursor (model.cursor + 1)
-  | List, Top -> move_cursor 0
-  | List, Bottom -> move_cursor last
-  | _, Toggle_focus ->
+  let clamp_edit c = Int.clamp_exn c ~min:0 ~max:(String.length model.editor.buf) in
+  match action with
+  | Start_search ->
+    { model with mode = Search; editor = Editor.empty; cursor = 0; detail_scroll = 0 }
+  | Exit_search ->
+    { model with mode = Browse; editor = Editor.empty; cursor = 0; detail_scroll = 0 }
+  | Insert c ->
+    edit_query model ~f:(fun { buf; cursor } ->
+      let cursor = Int.clamp_exn cursor ~min:0 ~max:(String.length buf) in
+      { buf = String.prefix buf cursor ^ String.of_char c ^ String.drop_prefix buf cursor
+      ; cursor = cursor + 1
+      })
+  | Backspace ->
+    edit_query model ~f:(fun { buf; cursor } ->
+      if cursor > 0
+      then
+        { buf = String.prefix buf (cursor - 1) ^ String.drop_prefix buf cursor
+        ; cursor = cursor - 1
+        }
+      else { buf; cursor })
+  | Delete_forward ->
+    edit_query model ~f:(fun { buf; cursor } ->
+      if cursor < String.length buf
+      then
+        { buf = String.prefix buf cursor ^ String.drop_prefix buf (cursor + 1); cursor }
+      else { buf; cursor })
+  | Kill_to_end ->
+    edit_query model ~f:(fun { buf; cursor } ->
+      { buf = String.prefix buf cursor; cursor })
+  | Kill_word_backward ->
+    edit_query model ~f:(fun { buf; cursor } ->
+      let start = word_boundary_backward buf cursor in
+      { buf = String.prefix buf start ^ String.drop_prefix buf cursor; cursor = start })
+  | Move_left ->
+    { model with
+      editor = { model.editor with cursor = clamp_edit (model.editor.cursor - 1) }
+    }
+  | Move_right ->
+    { model with
+      editor = { model.editor with cursor = clamp_edit (model.editor.cursor + 1) }
+    }
+  | Move_to_start -> { model with editor = { model.editor with cursor = 0 } }
+  | Move_to_end ->
+    { model with editor = { model.editor with cursor = String.length model.editor.buf } }
+  (* Navigation is routed by pane focus: in Detail the keys scroll the body, in List they
+     move the selection over the active list. *)
+  | Up ->
+    if Focus.equal model.focus Detail
+    then { model with detail_scroll = clamp_scroll (model.detail_scroll - 1) }
+    else move_cursor (model.cursor - 1)
+  | Down ->
+    if Focus.equal model.focus Detail
+    then { model with detail_scroll = clamp_scroll (model.detail_scroll + 1) }
+    else move_cursor (model.cursor + 1)
+  | Top ->
+    if Focus.equal model.focus Detail
+    then { model with detail_scroll = 0 }
+    else move_cursor 0
+  | Bottom ->
+    if Focus.equal model.focus Detail
+    then { model with detail_scroll = clamp_scroll detail_max }
+    else move_cursor last
+  | Toggle_focus ->
     let focus : Focus.t =
       match model.focus with
       | List -> Detail
       | Detail -> List
     in
     { model with focus }
-  | _, Focus_detail -> { model with focus = Detail }
+  | Focus_detail -> { model with focus = Detail }
 ;;
 
 let accent = Attr.Color.Expert.cyan
@@ -131,13 +316,17 @@ let render_list_row ~width ~is_selected (note : Db.Note.t) =
   View.text ~attrs label
 ;;
 
-let render_list ~width ~height ~cursor (notes : Db.Note.t list) =
+let render_list
+  ?(empty_label = "(no notes)")
+  ~width
+  ~height
+  ~cursor
+  (notes : Db.Note.t list)
+  =
   let content =
     match notes with
     | [] ->
-      View.center
-        (View.text ~attrs:[ Attr.fg dim ] "(no notes)")
-        ~within:{ width; height }
+      View.center (View.text ~attrs:[ Attr.fg dim ] empty_label) ~within:{ width; height }
     | _ ->
       let count = List.length notes in
       (* Scroll offset: keep cursor in the middle of the viewport when possible. *)
@@ -216,16 +405,68 @@ let render_detail ~width ~height ~scroll (note : Db.Note.t option) =
   fit ~width ~height content
 ;;
 
-let app ~(notes : Db.Note.t list) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
+(* The list pane title: in Browse it's just "Notes"; in Search it echoes the live query
+   with a cursor marker (▏) so you can see what you're typing and where the edit cursor
+   sits. [budget] is the column space the border box leaves for the title; the query
+   window scrolls horizontally to keep the cursor visible, so a long query stays usable
+   without the marker ever being split (the query buffer is pure ASCII, the marker is
+   multibyte). *)
+let list_title ~budget (model : Model.t) =
+  match model.mode with
+  | Browse -> "Notes"
+  | Search ->
+    let prefix = "Search: " in
+    let { Editor.buf; cursor } = model.editor in
+    let cursor = Int.clamp_exn cursor ~min:0 ~max:(String.length buf) in
+    (* Columns left for the query text after the label and the 1-col marker. *)
+    let avail = Int.max 1 (budget - String.length prefix - 1) in
+    (* Slide a window over [buf] so [cursor] is always inside it. *)
+    let start = Int.max 0 (cursor - avail) in
+    let len = Int.min avail (String.length buf - start) in
+    let window = String.sub buf ~pos:start ~len in
+    let rel = cursor - start in
+    let before = String.prefix window rel in
+    let after = String.drop_prefix window rel in
+    [%string "%{prefix}%{before}▏%{after}"]
+;;
+
+let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
   : view:View.t Bonsai.t * handler:(Event.t -> unit Effect.t) Bonsai.t
   =
-  let count = List.length notes in
+  (* Browse corpus: loaded once for the app's lifetime. The live handle stays open so the
+     search path can re-query; see [launch_tui]. *)
+  let notes = Db.list_all db in
   let model, set_model =
     Bonsai.state'
       Model.initial
       ~sexp_of_model:[%sexp_of: Model.t]
       ~equal:[%equal: Model.t]
       graph
+  in
+  (* Live FTS results, derived from the query buffer. The raw buffer is sanitized to a
+     safe MATCH (so half-typed input can't raise an FTS5 error), then [cutoff] on the
+     string keeps us from re-querying when the buffer changes in a way that doesn't change
+     the query text. An empty sanitized query yields no results (rather than a [""]
+     MATCH). *)
+  let safe_query =
+    Bonsai.cutoff
+      ~equal:String.equal
+      (let%arr model in
+       Fts_query.sanitize model.editor.buf)
+  in
+  let results =
+    let%arr safe_query in
+    if String.is_empty safe_query
+    then []
+    else Db.search db ~query:safe_query ~limit:200 ()
+  in
+  (* The active list backs both selection and rendering: results in Search, corpus in
+     Browse. Cursor/scroll clamping is computed against whichever is active. *)
+  let active =
+    let%arr model and results in
+    match model.mode with
+    | Search -> results
+    | Browse -> notes
   in
   (* Border boxes cost 2 cols each (left+right); two boxes = 4. Split the rest
      golden-ratio: list ~38%, detail ~62%. *)
@@ -237,23 +478,37 @@ let app ~(notes : Db.Note.t list) ~(dimensions : Dimensions.t Bonsai.t) (local_ 
     let pane_h = Int.max 3 (height - 2) in
     list_w, detail_w, pane_h
   in
-  (* Inject derives [detail_max] from the live pane geometry and the note the cursor is
-     on, so the reducer can clamp detail scrolling against the actually-rendered body. *)
+  (* A single inject takes the raw key and does mode/focus routing inside [set_model], so
+     it reads the live model rather than a handler value that's only as fresh as the last
+     view recompute. [count]/[detail_max] for nav clamping come from the *active* list and
+     live pane geometry; a one-frame-stale [active] only affects nav clamping (which
+     self-corrects next frame), never query editing. *)
   let inject =
     let%arr set_model
+    and active
     and _, detail_w, pane_h = panes in
-    fun (action : Action.t) ->
+    fun (event : Event.t) ->
       set_model (fun model ->
-        let selected = List.nth notes model.cursor in
-        let detail_max = detail_max_scroll ~width:detail_w ~height:pane_h selected in
-        apply_action_pure ~count ~detail_max model action)
+        match route model event with
+        | None -> model
+        | Some action ->
+          let count = List.length active in
+          let selected = List.nth active model.cursor in
+          let detail_max = detail_max_scroll ~width:detail_w ~height:pane_h selected in
+          apply_action_pure ~count ~detail_max model action)
   in
   let view =
     let%arr model
+    and active
     and { Dimensions.width; height } = dimensions
     and list_w, detail_w, pane_h = panes in
-    let selected = List.nth notes model.cursor in
+    let selected = List.nth active model.cursor in
     let list_focused = [%equal: Focus.t] model.focus List in
+    let searching = [%equal: Mode.t] model.mode Search in
+    (* The border box lays [title] into the top edge as-is (no truncation), so callers
+       must size it to the pane — [list_title ~budget] does that for the search query. The
+       [╭ ] prefix and trailing [ ─╮] consume ~4 cols; the [<tab>] hint (shown on the
+       unfocused pane) eats more, so its width is folded into the budget below. *)
     let box ~focused ~title content =
       let color = if focused then accent else dim in
       let tab = if focused then "" else " <tab>" in
@@ -264,11 +519,17 @@ let app ~(notes : Db.Note.t list) ~(dimensions : Dimensions.t Bonsai.t) (local_ 
         ~title_attrs:[ Attr.fg color; Attr.bold ]
         content
     in
+    let tab_cols = if list_focused then 0 else String.length " <tab>" in
     let list_box =
       box
         ~focused:list_focused
-        ~title:"Notes"
-        (render_list ~width:list_w ~height:pane_h ~cursor:model.cursor notes)
+        ~title:(list_title ~budget:(list_w - 4 - tab_cols) model)
+        (render_list
+           ~empty_label:(if searching then "(no matches)" else "(no notes)")
+           ~width:list_w
+           ~height:pane_h
+           ~cursor:model.cursor
+           active)
     in
     let detail_box =
       box
@@ -284,19 +545,11 @@ let app ~(notes : Db.Note.t list) ~(dimensions : Dimensions.t Bonsai.t) (local_ 
     (* Backdrop so the framed panes sit on a full-screen rectangle. *)
     View.zcat [ content; View.rectangle ~width ~height () ]
   in
+  (* The handler just forwards every key to [inject]; all mode/focus routing happens in
+     the reducer against the live model (see [route] / [inject]). *)
   let handler =
     let%arr inject in
-    fun (event : Event.t) ->
-      match event with
-      | Key_press { key = Tab; mods = _ } -> inject Toggle_focus
-      | Key_press { key = ASCII 'N'; mods = [ Ctrl ] }
-      | Key_press { key = Arrow `Down; mods = [] } -> inject Down
-      | Key_press { key = ASCII 'P'; mods = [ Ctrl ] }
-      | Key_press { key = Arrow `Up; mods = [] } -> inject Up
-      | Key_press { key = ASCII 'A'; mods = [ Ctrl ] } -> inject Top
-      | Key_press { key = ASCII 'E'; mods = [ Ctrl ] } -> inject Bottom
-      | Key_press { key = Enter; mods = [] } -> inject Focus_detail
-      | _ -> Effect.Ignore
+    fun (event : Event.t) -> inject event
   in
   ~view, ~handler
 ;;
@@ -337,9 +590,17 @@ let print_notes (notes : Db.Note.t list) =
          ]))
 ;;
 
+(* The DB handle stays open for the whole TUI run so the search path can re-query live.
+   [with_db]'s synchronous bracket won't do here: [app] reads the corpus and then the
+   Bonsai loop keeps querying until the user quits, so we must close only after the run's
+   deferred resolves, not when [Bonsai_term.start] returns its (still-pending) deferred. *)
 let launch_tui db_path =
-  let notes = Db.with_db db_path ~f:Db.list_all in
-  Bonsai_term.start (app ~notes)
+  let db = Db.open_ db_path in
+  Async.Monitor.protect
+    ~finally:(fun () ->
+      Db.close db;
+      Async.return ())
+    (fun () -> Bonsai_term.start (app ~db))
 ;;
 
 (* Synchronous entry point for the no-subcommand group body, which runs outside the Async
