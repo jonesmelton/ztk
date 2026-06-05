@@ -1,6 +1,9 @@
 open! Core
 open Bonsai_test
+open Bonsai_term
 module Db = Zet.Db
+
+let key ?(mods = []) k = Event.Key_press { key = k; mods }
 
 (* Build an in-memory DB seeded from the canonical schema + seed scripts so the
    tests are hermetic and exercise the real SQL the app ships. *)
@@ -129,14 +132,26 @@ let%expect_test "print_notes emits the headless tab-separated format" =
     |}]
 ;;
 
-let%expect_test "app renders seeded notes" =
+let notes_handle () =
   let db = seeded_db () in
   let notes = Db.list_all db in
   Db.close db;
-  let handle = Bonsai_term_test.create_handle (Zet.app ~notes) in
+  Bonsai_term_test.create_handle (Zet.app ~notes)
+;;
+
+let%expect_test "app renders two panes with list focused, first note selected" =
+  let handle = notes_handle () in
   Handle.show handle;
   [%expect {|
     ┌────────────────────────────────────────────────────────────────────────────────┐
+    │╭ Notes ────────────╮╭ Detail <tab> ─────────────────────────────────╮          │
+    ││> Hello, zet       ││Hello, zet                                     │          │
+    ││  OCaml type system││#1  note                                       │          │
+    ││  Morning pages    ││slug: hello-zet                                │          │
+    ││  Quick capture    ││date: 2026-06-03                               │          │
+    ││  2026-05-28       ││                                               │          │
+    │╰───────────────────╯│This is the first seeded note. It exists so the│          │
+    │                     ╰───────────────────────────────────────────────╯          │
     │                                                                                │
     │                                                                                │
     │                                                                                │
@@ -154,11 +169,57 @@ let%expect_test "app renders seeded notes" =
     │                                                                                │
     │                                                                                │
     │                                                                                │
-    │                              1  Hello, zet                                     │
-    │                              2  OCaml type system                              │
-    │                              3  Morning pages                                  │
-    │                              4  Quick capture                                  │
-    │                              5  2026-05-28                                     │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    └────────────────────────────────────────────────────────────────────────────────┘
+    |}]
+;;
+
+(* j moves the cursor down; Tab moves focus to the detail pane (title hints
+   flip); the detail pane tracks the selected note's body. *)
+let%expect_test "j moves cursor, Tab switches focus to detail" =
+  let handle = notes_handle () in
+  Bonsai_term_test.send_event handle (key (ASCII 'j'));
+  Bonsai_term_test.send_event handle (key Tab);
+  Handle.show handle;
+  [%expect {|
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │╭ Notes <tab> ──────╮╭ Detail ──────────────────────────────────────╮           │
+    ││  Hello, zet       ││OCaml type system                             │           │
+    ││> OCaml type system││#2  note                                      │           │
+    ││  Morning pages    ││slug: ocaml-notes                             │           │
+    ││  Quick capture    ││date: 2026-06-01                              │           │
+    ││  2026-05-28       ││                                              │           │
+    │╰───────────────────╯│Notes on the OCaml module system and functors.│           │
+    │                     ╰──────────────────────────────────────────────╯           │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
+    │                                                                                │
     │                                                                                │
     │                                                                                │
     │                                                                                │
