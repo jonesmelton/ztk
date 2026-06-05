@@ -138,11 +138,11 @@ let%expect_test "print_notes emits the headless tab-separated format" =
     |}]
 ;;
 
-let notes_handle () =
+let notes_handle ?initial_dimensions () =
   let db = seeded_db () in
   let notes = Db.list_all db in
   Db.close db;
-  Bonsai_term_test.create_handle (Zet.app ~notes)
+  Bonsai_term_test.create_handle ?initial_dimensions (Zet.app ~notes)
 ;;
 
 let%expect_test "app renders two panes with list focused, first note selected" =
@@ -151,46 +151,46 @@ let%expect_test "app renders two panes with list focused, first note selected" =
   [%expect
     {|
     ┌────────────────────────────────────────────────────────────────────────────────┐
-    │╭ Notes ────────────╮╭ Detail <tab> ─────────────────────────────────╮          │
-    ││> Hello, zet       ││Hello, zet                                     │          │
-    ││  OCaml type system││#1  note                                       │          │
-    ││  Morning pages    ││slug: hello-zet                                │          │
-    ││  Quick capture    ││date: 2026-06-03                               │          │
-    ││  2026-05-28       ││                                               │          │
-    │╰───────────────────╯│This is the first seeded note. It exists so the│          │
-    │                     ╰───────────────────────────────────────────────╯          │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
+    │╭ Notes ──────────────────────╮╭ Detail <tab> ─────────────────────────────────╮│
+    ││> Hello, zet                 ││Hello, zet                                     ││
+    ││  OCaml type system          ││#1  note                                       ││
+    ││  Morning pages              ││slug: hello-zet                                ││
+    ││  Quick capture              ││date: 2026-06-03                               ││
+    ││  2026-05-28                 ││                                               ││
+    ││                             ││This is the first seeded note. It exists so the││
+    ││                             ││TUI has something to render while the data     ││
+    ││                             ││layer is wired up.                             ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    │╰─────────────────────────────╯╰───────────────────────────────────────────────╯│
     └────────────────────────────────────────────────────────────────────────────────┘
     |}]
 ;;
@@ -205,46 +205,86 @@ let%expect_test "C-n moves cursor, Tab switches focus to detail" =
   [%expect
     {|
     ┌────────────────────────────────────────────────────────────────────────────────┐
-    │╭ Notes <tab> ──────╮╭ Detail ──────────────────────────────────────╮           │
-    ││  Hello, zet       ││OCaml type system                             │           │
-    ││> OCaml type system││#2  note                                      │           │
-    ││  Morning pages    ││slug: ocaml-notes                             │           │
-    ││  Quick capture    ││date: 2026-06-01                              │           │
-    ││  2026-05-28       ││                                              │           │
-    │╰───────────────────╯│Notes on the OCaml module system and functors.│           │
-    │                     ╰──────────────────────────────────────────────╯           │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
-    │                                                                                │
+    │╭ Notes <tab> ────────────────╮╭ Detail ───────────────────────────────────────╮│
+    ││  Hello, zet                 ││OCaml type system                              ││
+    ││> OCaml type system          ││#2  note                                       ││
+    ││  Morning pages              ││slug: ocaml-notes                              ││
+    ││  Quick capture              ││date: 2026-06-01                               ││
+    ││  2026-05-28                 ││                                               ││
+    ││                             ││Notes on the OCaml module system and functors. ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    │╰─────────────────────────────╯╰───────────────────────────────────────────────╯│
     └────────────────────────────────────────────────────────────────────────────────┘
+    |}]
+;;
+
+(* In a short terminal the selected note's body overflows the detail pane. With the detail
+   pane focused, C-n scrolls the body: the first body lines drop off the top while the
+   fixed header stays put, and later wrapped lines scroll into view. *)
+let%expect_test "detail pane scrolls its body when focused" =
+  let handle = notes_handle ~initial_dimensions:{ width = 54; height = 10 } () in
+  Bonsai_term_test.send_event handle (key Tab);
+  Handle.show handle;
+  [%expect {|
+    ┌──────────────────────────────────────────────────────┐
+    │╭ Notes <tab> ──────╮╭ Detail ───────────────────────╮│
+    ││> Hello, zet       ││Hello, zet                     ││
+    ││  OCaml type system││#1  note                       ││
+    ││  Morning pages    ││slug: hello-zet                ││
+    ││  Quick capture    ││date: 2026-06-03               ││
+    ││  2026-05-28       ││                               ││
+    ││                   ││This is the first seeded note. ││
+    ││                   ││It exists so the TUI has       ││
+    ││                   ││something to render while the  ││
+    │╰───────────────────╯╰───────────────────────────────╯│
+    └──────────────────────────────────────────────────────┘
+    |}];
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'N'));
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'N'));
+  Handle.show handle;
+  [%expect {|
+    ┌──────────────────────────────────────────────────────┐
+    │╭ Notes <tab> ──────╮╭ Detail ───────────────────────╮│
+    ││> Hello, zet       ││Hello, zet                     ││
+    ││  OCaml type system││#1  note                       ││
+    ││  Morning pages    ││slug: hello-zet                ││
+    ││  Quick capture    ││date: 2026-06-03               ││
+    ││  2026-05-28       ││                               ││
+    ││                   ││It exists so the TUI has       ││
+    ││                   ││something to render while the  ││
+    ││                   ││data layer is wired up.        ││
+    │╰───────────────────╯╰───────────────────────────────╯│
+    └──────────────────────────────────────────────────────┘
     |}]
 ;;

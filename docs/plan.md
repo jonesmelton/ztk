@@ -13,6 +13,9 @@ see `decisions.md`. For working conventions, see `CLAUDE.md`.
 
 - **Phase 0 complete** (2026-06-03). Project scaffolded, `dune build` and
   `dune runtest` green on `5.2.0+ox`, binary builds. See "Phase 0 — DONE" below.
+- **Phase 1 complete** (2026-06-04). Typed sqlite3_utils data layer. See below.
+- **Phase 2 complete** (2026-06-04). Read-only two-pane browse UI + headless CLI
+  mirrors (`list`/`show`/`search`). See "Phase 2 — DONE" below.
 - Toolchain: opam switch `5.2.0+ox` (OxCaml), `core` / `async` /
   `ppx_jane` at `v0.18~preview.130.91+190`. `sqlite3` CLI present at
   `/opt/homebrew/opt/sqlite/bin/sqlite3`.
@@ -161,9 +164,42 @@ Original recipe (kept for reference; replace caqti steps with the above):
 3. Unit/expect tests against a small fixture DB (build one with the `sqlite3`
    CLI in a test setup, or ship a tiny `.sql` seed).
 
-### Phase 2 — Browse UI (list + detail), read-only
+### Phase 2 — Browse UI (list + detail), read-only — DONE ✅ (2026-06-04)
 
 Goal: the strace_ui-shaped two-pane app, reading real notes.
+
+**What shipped** (`src/zet.ml`): a two-pane list+detail browser. `Model.t` =
+`{ cursor; focus }`; `Action.t` reducer (`apply_action_pure ~count`) for cursor
+up/down/top/bottom and focus toggle. Panes framed with
+`Bonsai_term_border_box` (round corners, focus-colored title + `<tab>` hint),
+golden-ratio split (list ~38% / detail ~62%). Keys: Tab toggles focus, C-n/C-p
+or arrows move the cursor, C-a/C-e jump top/bottom, Enter focuses detail. The
+corpus is loaded **once** via `Db.list_all` in `launch_tui` and passed in as a
+plain `~notes` list (not yet a Bonsai-derived value — Phase 3 changes this).
+Headless mirrors shipped too: `list` (`-recent N`), `show IDENT`, `search`.
+
+**Known deviations from the original recipe** (carried forward as Phase 3 work):
+- `virtual_list` / `scroller` were **not** used — `render_list` is a hand-rolled
+  scroll-offset calc, `render_detail` has no scroll at all. Fine for small
+  corpora; revisit with the components for large ones / detail scrolling.
+- Scroll is hardwired to the list cursor; the detail pane can't scroll even when
+  focused (so long notes are unreadable past one screen).
+- List pane width derives from the longest *visible* title, so it jitters while
+  scrolling; detail pane long lines overflow off-screen (no wrap/truncate).
+
+These three are the subject of the **Phase 2.5 polish pass** below.
+
+#### Phase 2.5 — Browse UI polish (in progress)
+
+Refinement of the shipped Phase 2 UI, before search UX:
+1. **Stable list width** — pane width must not depend on visible content;
+   derive purely from terminal dimensions so it doesn't jitter on scroll.
+2. **Detail text flow** — wrap (or hard-truncate) long body lines to the pane
+   width so nothing runs off-screen and unreadable.
+3. **Detail scrolling** — when the detail pane has focus, cursor/scroll keys
+   scroll the body; long notes become fully readable.
+
+Original recipe (for reference; the shipped form differs as noted above):
 
 1. **Model** (single record, strace_ui style):
    - corpus / current result set (wrap big mutable vecs in the `Box.t`
