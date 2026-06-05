@@ -533,3 +533,103 @@ let%expect_test "search highlights matched terms in list and detail" =
     (off fg:cyan)╰(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)─(off fg:cyan)╯(off fg:gray)╰(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)─(off fg:gray)╯(off)
     |}]
 ;;
+
+(* [?] in Browse opens the keybinding overlay centered over the panes; the corpus stays
+   visible behind it. [?] again (or Esc / C-g / q) dismisses it back to Browse. *)
+let%expect_test "? opens and closes the help overlay" =
+  let handle = notes_handle () in
+  Bonsai_term_test.send_event handle (key (ASCII '?'));
+  Handle.show handle;
+  [%expect
+    {|
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │╭ Notes ──────────────────────╮╭ Detail <tab> ─────────────────────────────────╮│
+    ││> Hello, zet                 ││Hello, zet                                     ││
+    ││  OCaml type system          ││#1  note                                       ││
+    ││  Morning pages              ││slug: hello-zet                                ││
+    ││  Quick capture              ││date: 2026-06-03                               ││
+    ││  2026-05-28                 ││                                               ││
+    ││                             ││This is the first seeded note. It exists so the││
+    ││                             ││TUI has something to render while the data     ││
+    ││                ╭ Keybindings ───────────────────────────────╮                ││
+    ││                │ Navigation                                 │                ││
+    ││                │ C-n / C-p      next / previous note        │                ││
+    ││                │ C-a / C-e      first / last note           │                ││
+    ││                │ Tab            switch list / detail pane   │                ││
+    ││                │ Enter          focus the detail pane       │                ││
+    ││                │                                            │                ││
+    ││                │ Detail pane                                │                ││
+    ││                │ C-n / C-p      scroll body down / up       │                ││
+    ││                │ C-a / C-e      top / bottom                │                ││
+    ││                │                                            │                ││
+    ││                │ Search                                     │                ││
+    ││                │ /              start full-text search      │                ││
+    ││                │ C-b / C-f      move cursor left / right    │                ││
+    ││                │ C-k            kill to end of line         │                ││
+    ││                │ C-w            kill word backward          │                ││
+    ││                │ C-d / DEL      delete char forward / back  │                ││
+    ││                │ Enter          commit query, focus results │                ││
+    ││                │ Esc            cancel search               │                ││
+    ││                │                                            │                ││
+    ││                │ General                                    │                ││
+    ││                │ ?              toggle this help            │                ││
+    ││                │ C-g / Esc / q  close help                  │                ││
+    ││                ╰────────────────────────────────────────────╯                ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    │╰─────────────────────────────╯╰───────────────────────────────────────────────╯│
+    └────────────────────────────────────────────────────────────────────────────────┘
+    |}];
+  Bonsai_term_test.send_event handle (key (ASCII '?'));
+  Handle.show handle;
+  [%expect
+    {|
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │╭ Notes ──────────────────────╮╭ Detail <tab> ─────────────────────────────────╮│
+    ││> Hello, zet                 ││Hello, zet                                     ││
+    ││  OCaml type system          ││#1  note                                       ││
+    ││  Morning pages              ││slug: hello-zet                                ││
+    ││  Quick capture              ││date: 2026-06-03                               ││
+    ││  2026-05-28                 ││                                               ││
+    ││                             ││This is the first seeded note. It exists so the││
+    ││                             ││TUI has something to render while the data     ││
+    ││                             ││layer is wired up.                             ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    │╰─────────────────────────────╯╰───────────────────────────────────────────────╯│
+    └────────────────────────────────────────────────────────────────────────────────┘
+    |}]
+;;

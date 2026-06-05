@@ -173,6 +173,10 @@ Emacs-style bindings throughout — both TUI and any textbox/input widgets.
 
 **Focus switching:** `TAB` moves between panes (as in strace_ui skeleton).
 
+**Help:** `?` (in Browse) toggles a centered keybinding cheat-sheet overlay;
+`?` / `C-g` / `Esc` / `q` dismiss it. The overlay's binding list is built from
+`help_sections` in `src/zet.ml` — keep it in sync with this section.
+
 **Rationale:** strace_ui's `filter_editor.ml` already implements emacs line-editing.
 The list navigation keys match what Emacs users expect from `dired`/`helm`/`ivy`.
 `C-g` is the universal bail-out — it should never be consumed by a focused widget

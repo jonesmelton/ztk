@@ -88,6 +88,7 @@ module Mode = struct
   type t =
     | Browse
     | Search
+    | Help (* full-screen keybinding cheat-sheet overlay; dismiss back to Browse *)
   [@@deriving sexp_of, equal]
 end
 
@@ -133,6 +134,8 @@ module Action = struct
     | Focus_detail
     | Start_search (* [/] in Browse: enter Search, fresh empty query *)
     | Exit_search (* Esc in Search: back to Browse, clear query *)
+    | Open_help (* [?] in Browse: show the keybinding overlay *)
+    | Close_help (* Esc/C-g/?/q in Help: back to Browse *)
     | Insert of char
     | Backspace
     | Delete_forward
@@ -152,6 +155,15 @@ end
    for keys with no binding in the current mode. *)
 let route (model : Model.t) (event : Event.t) : Action.t option =
   match model.mode with
+  (* Help overlay swallows the keyboard: any of Esc, C-g, ?, or q dismisses it; everything
+     else is inert so a stray key can't act on the list underneath. *)
+  | Help ->
+    (match event with
+     | Key_press { key = Escape; mods = _ }
+     | Key_press { key = ASCII 'G'; mods = [ Ctrl ] }
+     | Key_press { key = ASCII '?'; mods = _ }
+     | Key_press { key = ASCII 'q'; mods = [] } -> Some Close_help
+     | _ -> None)
   (* Search mode captures the keyboard for editing the query line. Esc leaves search;
      Enter commits — it hands focus to the list so you can navigate results, query still
      applied. The emacs editing set is lifted from strace_ui's filter_editor. *)
@@ -181,6 +193,7 @@ let route (model : Model.t) (event : Event.t) : Action.t option =
   | Browse ->
     (match event with
      | Key_press { key = ASCII '/'; mods = [] } -> Some Start_search
+     | Key_press { key = ASCII '?'; mods = _ } -> Some Open_help
      | Key_press { key = Tab; mods = _ } -> Some Toggle_focus
      | Key_press { key = ASCII 'N'; mods = [ Ctrl ] }
      | Key_press { key = Arrow `Down; mods = [] } -> Some Down
@@ -229,6 +242,8 @@ let apply_action_pure ~count ~detail_max (model : Model.t) (action : Action.t) :
     { model with mode = Search; editor = Editor.empty; cursor = 0; detail_scroll = 0 }
   | Exit_search ->
     { model with mode = Browse; editor = Editor.empty; cursor = 0; detail_scroll = 0 }
+  | Open_help -> { model with mode = Help }
+  | Close_help -> { model with mode = Browse }
   | Insert c ->
     edit_query model ~f:(fun { buf; cursor } ->
       let cursor = Int.clamp_exn cursor ~min:0 ~max:(String.length buf) in
@@ -462,7 +477,7 @@ let render_detail ?(terms = []) ~width ~height ~scroll (note : Db.Note.t option)
    multibyte). *)
 let list_title ~budget (model : Model.t) =
   match model.mode with
-  | Browse -> "Notes"
+  | Browse | Help -> "Notes"
   | Search ->
     let prefix = "Search: " in
     let { Editor.buf; cursor } = model.editor in
@@ -477,6 +492,68 @@ let list_title ~budget (model : Model.t) =
     let before = String.prefix window rel in
     let after = String.drop_prefix window rel in
     [%string "%{prefix}%{before}▏%{after}"]
+;;
+
+(* The keybinding cheat-sheet, as (keys, description) rows grouped under headings. Mirrors
+   docs/decisions.md "Keyboard conventions"; keep the two in sync when bindings change. *)
+let help_sections =
+  [ ( "Navigation"
+    , [ "C-n / C-p", "next / previous note"
+      ; "C-a / C-e", "first / last note"
+      ; "Tab", "switch list / detail pane"
+      ; "Enter", "focus the detail pane"
+      ] )
+  ; "Detail pane", [ "C-n / C-p", "scroll body down / up"; "C-a / C-e", "top / bottom" ]
+  ; ( "Search"
+    , [ "/", "start full-text search"
+      ; "C-b / C-f", "move cursor left / right"
+      ; "C-k", "kill to end of line"
+      ; "C-w", "kill word backward"
+      ; "C-d / DEL", "delete char forward / back"
+      ; "Enter", "commit query, focus results"
+      ; "Esc", "cancel search"
+      ] )
+  ; "General", [ "?", "toggle this help"; "C-g / Esc / q", "close help" ]
+  ]
+;;
+
+(* Render the help overlay: a bordered box listing every binding, centered over the panes.
+   The key column is padded to a fixed width so descriptions line up. Width/height are
+   computed from the content so the box hugs the text; [center] places it on the screen. *)
+let render_help ~width ~height =
+  let key_col =
+    List.concat_map help_sections ~f:(fun (_, rows) -> List.map rows ~f:fst)
+    |> List.map ~f:String.length
+    |> List.max_elt ~compare:Int.compare
+    |> Option.value ~default:0
+  in
+  let row (keys, desc) =
+    View.hcat
+      [ View.text ~attrs:[ Attr.fg accent ] (String.pad_right keys ~len:key_col)
+      ; View.text "  "
+      ; View.text desc
+      ]
+  in
+  let blocks =
+    List.concat_map help_sections ~f:(fun (heading, rows) ->
+      (View.text ~attrs:[ Attr.fg dim; Attr.bold ] heading :: List.map rows ~f:row)
+      @ [ View.text "" ])
+  in
+  (* Drop the trailing blank line so the box doesn't end with dead space. *)
+  let blocks =
+    match List.rev blocks with
+    | _ :: rest -> List.rev rest
+    | [] -> []
+  in
+  let box =
+    Bonsai_term_border_box.view
+      ~line_type:Round_corners
+      ~attrs:[ Attr.fg accent ]
+      ~title:"Keybindings"
+      ~title_attrs:[ Attr.fg accent; Attr.bold ]
+      (View.pad ~l:1 ~r:1 (View.vcat blocks))
+  in
+  View.center box ~within:{ width; height }
 ;;
 
 let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
@@ -515,7 +592,7 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     let%arr model and results in
     match model.mode with
     | Search -> results
-    | Browse -> notes
+    | Browse | Help -> notes
   in
   (* Border boxes cost 2 cols each (left+right); two boxes = 4. Split the rest
      golden-ratio: list ~38%, detail ~62%. *)
@@ -600,8 +677,15 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
            selected)
     in
     let content = View.hcat [ list_box; detail_box ] in
+    (* In Help mode the cheat-sheet sits on top of the panes, which stay visible behind
+       it. [zcat] draws earlier elements on top, so the overlay goes first. *)
+    let overlay =
+      match model.mode with
+      | Help -> [ render_help ~width ~height ]
+      | Browse | Search -> []
+    in
     (* Backdrop so the framed panes sit on a full-screen rectangle. *)
-    View.zcat [ content; View.rectangle ~width ~height () ]
+    View.zcat (overlay @ [ content; View.rectangle ~width ~height () ])
   in
   (* The handler just forwards every key to [inject]; all mode/focus routing happens in
      the reducer against the live model (see [route] / [inject]). *)
