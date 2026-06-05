@@ -1,1 +1,2 @@
-(dirs (:standard \ references))
+(dirs
+ (:standard \ references))

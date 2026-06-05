@@ -2,8 +2,8 @@ open! Core
 module S = Sqlite3_utils
 
 module Note = struct
-  (* [slug] and [title] are nullable in the real schema: untitled journal
-     entries have neither. [kind] and [body] are always present in practice. *)
+  (* [slug] and [title] are nullable in the real schema: untitled journal entries have
+     neither. [kind] and [body] are always present in practice. *)
   type t =
     { id : int
     ; slug : string option
@@ -15,8 +15,8 @@ module Note = struct
     }
   [@@deriving sexp_of, fields]
 
-  (* A human label for lists/headers. Untitled journal entries fall back to
-     their entry date, then to a bare id, so every note shows *something*. *)
+  (* A human label for lists/headers. Untitled journal entries fall back to their entry
+     date, then to a bare id, so every note shows *something*. *)
   let display_title t =
     match t.title with
     | Some title -> title
@@ -30,14 +30,14 @@ end
 type t = S.t
 
 let open_ path =
-  (* Create the containing directory so a default like ~/.zet/zet.db works on a
-     fresh machine. Skip for SQLite's special URIs (":memory:", "") which have
-     no real parent. *)
+  (* Create the containing directory so a default like ~/.zet/zet.db works on a fresh
+     machine. Skip for SQLite's special URIs (":memory:", "") which have no real parent. *)
   (match path with
    | ":memory:" | "" -> ()
    | path -> Core_unix.mkdir_p (Filename.dirname path));
   Sqlite3.db_open path
 ;;
+
 let close t = ignore (Sqlite3.db_close t : bool)
 
 let with_db path ~f =
@@ -51,15 +51,15 @@ let exec_script (t : t) sql =
   | rc -> failwithf "exec_script failed: %s" (Sqlite3.Rc.to_string rc) ()
 ;;
 
-(* The seven note columns, in a fixed order, plus the decoder that maps a row to
-   [Note.t]. Every note-returning query selects exactly these (in this order) so
-   they can share this single typed row description. *)
+(* The seven note columns, in a fixed order, plus the decoder that maps a row to [Note.t].
+   Every note-returning query selects exactly these (in this order) so they can share this
+   single typed row description. *)
 let note_row =
-  S.Ty.
+  S.Ty.(
     ( p6 int (nullable text) text (nullable text) text (nullable text)
       @>> p1 (nullable text)
     , fun id slug kind title body entry_date metadata : Note.t ->
-        { id; slug; kind; title; body; entry_date; metadata } )
+        { id; slug; kind; title; body; entry_date; metadata } ))
 ;;
 
 let list_all (t : t) : Note.t list =
@@ -134,9 +134,9 @@ let get_by_slug (t : t) slug : Note.t option =
     slug
 ;;
 
-(* FTS5 search over notes_fts (external-content, trigger-synced). [query] is a
-   raw FTS5 MATCH expression. Results are ranked best-first. When [kind] is
-   given, restrict to that note kind. *)
+(* FTS5 search over notes_fts (external-content, trigger-synced). [query] is a raw FTS5
+   MATCH expression. Results are ranked best-first. When [kind] is given, restrict to that
+   note kind. *)
 let search (t : t) ~query ?kind ~limit () : Note.t list =
   let params, row = note_row in
   match kind with
@@ -184,9 +184,8 @@ let search (t : t) ~query ?kind ~limit () : Note.t list =
       limit
 ;;
 
-(* Tags of a note, read from its metadata JSON [$.tags] via json_each so the
-   parsing matches [filter_by_tag] exactly. Returns [] when the note has no
-   metadata or no tags. *)
+(* Tags of a note, read from its metadata JSON [$.tags] via json_each so the parsing
+   matches [filter_by_tag] exactly. Returns [] when the note has no metadata or no tags. *)
 let tags_of (t : t) (note : Note.t) : string list =
   S.exec_exn
     t

@@ -5,8 +5,8 @@ module Db = Zet.Db
 
 let key ?(mods = []) k = Event.Key_press { key = k; mods }
 
-(* Build an in-memory DB seeded from the canonical schema + seed scripts so the
-   tests are hermetic and exercise the real SQL the app ships. *)
+(* Build an in-memory DB seeded from the canonical schema + seed scripts so the tests are
+   hermetic and exercise the real SQL the app ships. *)
 let seeded_db () =
   let db = Db.open_ ":memory:" in
   Db.exec_script db (In_channel.read_all "../db/schema.sql");
@@ -14,12 +14,13 @@ let seeded_db () =
   db
 ;;
 
-(* Render a note list compactly so query tests assert on what matters (which
-   notes, in what order) without pinning every column. *)
+(* Render a note list compactly so query tests assert on what matters (which notes, in
+   what order) without pinning every column. *)
 let show_titles notes =
   List.iter notes ~f:(fun (n : Db.Note.t) ->
     let slug = Option.value n.slug ~default:"-" in
-    print_endline (Printf.sprintf "%d %-14s %-7s %s" n.id slug n.kind (Db.Note.display_title n)))
+    print_endline
+      (Printf.sprintf "%d %-14s %-7s %s" n.id slug n.kind (Db.Note.display_title n)))
 ;;
 
 let%expect_test "list_all returns every seeded note, ordered by id" =
@@ -55,8 +56,11 @@ let%expect_test "get_by_id and get_by_slug" =
   let by_slug = Db.get_by_slug db "morning-pages" in
   let missing = Db.get_by_id db 999 in
   Db.close db;
-  print_s [%sexp ((by_id, by_slug, missing) : Db.Note.t option * Db.Note.t option * Db.Note.t option)];
-  [%expect {|
+  print_s
+    [%sexp
+      ((by_id, by_slug, missing) : Db.Note.t option * Db.Note.t option * Db.Note.t option)];
+  [%expect
+    {|
     (((
        (id 2)
        (slug (ocaml-notes))
@@ -86,7 +90,8 @@ let%expect_test "search ranks matches and filters by kind" =
   print_endline "-- kind=note --";
   show_titles notes_only;
   Db.close db;
-  [%expect {|
+  [%expect
+    {|
     -- all kinds --
     2 ocaml-notes    note    OCaml type system
     3 morning-pages  journal Morning pages
@@ -114,7 +119,8 @@ let%expect_test "filter_by_tag returns notes carrying the tag" =
   let demo = Db.filter_by_tag db ~tag:"demo" in
   Db.close db;
   show_titles demo;
-  [%expect {|
+  [%expect
+    {|
     1 hello-zet      note    Hello, zet
     2 ocaml-notes    note    OCaml type system
     |}]
@@ -142,7 +148,8 @@ let notes_handle () =
 let%expect_test "app renders two panes with list focused, first note selected" =
   let handle = notes_handle () in
   Handle.show handle;
-  [%expect {|
+  [%expect
+    {|
     ┌────────────────────────────────────────────────────────────────────────────────┐
     │╭ Notes ────────────╮╭ Detail <tab> ─────────────────────────────────╮          │
     ││> Hello, zet       ││Hello, zet                                     │          │
@@ -188,14 +195,15 @@ let%expect_test "app renders two panes with list focused, first note selected" =
     |}]
 ;;
 
-(* j moves the cursor down; Tab moves focus to the detail pane (title hints
-   flip); the detail pane tracks the selected note's body. *)
+(* j moves the cursor down; Tab moves focus to the detail pane (title hints flip); the
+   detail pane tracks the selected note's body. *)
 let%expect_test "j moves cursor, Tab switches focus to detail" =
   let handle = notes_handle () in
   Bonsai_term_test.send_event handle (key (ASCII 'j'));
   Bonsai_term_test.send_event handle (key Tab);
   Handle.show handle;
-  [%expect {|
+  [%expect
+    {|
     ┌────────────────────────────────────────────────────────────────────────────────┐
     │╭ Notes <tab> ──────╮╭ Detail ──────────────────────────────────────╮           │
     ││  Hello, zet       ││OCaml type system                             │           │

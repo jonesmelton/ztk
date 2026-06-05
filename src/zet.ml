@@ -3,10 +3,10 @@ open! Bonsai_term
 open Bonsai.Let_syntax
 module Db = Db
 
-(* ── Phase 2 skeleton: read-only two-pane browse UI ───────────────────────
-   The note corpus is loaded once and passed in immutably; only the cursor and
-   pane focus live in Bonsai state. Components (virtual_list, scroller) and FTS
-   search come in later passes — this is the strace_ui-shaped skeleton. *)
+(* ── Phase 2 skeleton: read-only two-pane browse UI ─────────────────────── The note
+   corpus is loaded once and passed in immutably; only the cursor and pane focus live in
+   Bonsai state. Components (virtual_list, scroller) and FTS search come in later passes —
+   this is the strace_ui-shaped skeleton. *)
 
 module Focus = struct
   type t =
@@ -36,8 +36,8 @@ module Action = struct
   [@@deriving sexp_of]
 end
 
-(* Pure reducer. [count] is the corpus size, threaded in so cursor motion can
-   clamp without the model needing to carry the notes. *)
+(* Pure reducer. [count] is the corpus size, threaded in so cursor motion can clamp
+   without the model needing to carry the notes. *)
 let apply_action_pure ~count (model : Model.t) (action : Action.t) : Model.t =
   let last = Int.max 0 (count - 1) in
   let clamp i = Int.clamp_exn i ~min:0 ~max:last in
@@ -72,7 +72,8 @@ let render_list_row ~width ~is_selected (note : Db.Note.t) =
 
 let render_list ~width ~height ~cursor (notes : Db.Note.t list) =
   match notes with
-  | [] -> View.center (View.text ~attrs:[ Attr.fg dim ] "(no notes)") ~within:{ width; height }
+  | [] ->
+    View.center (View.text ~attrs:[ Attr.fg dim ] "(no notes)") ~within:{ width; height }
   | _ ->
     let rows =
       List.mapi notes ~f:(fun i note ->
@@ -91,9 +92,10 @@ let render_detail ~width (note : Db.Note.t option) =
       @ (match note.slug with
          | Some s -> [ Printf.sprintf "slug: %s" s ]
          | None -> [])
-      @ (match note.entry_date with
-         | Some d -> [ Printf.sprintf "date: %s" d ]
-         | None -> [])
+      @
+      match note.entry_date with
+      | Some d -> [ Printf.sprintf "date: %s" d ]
+      | None -> []
     in
     let header =
       View.vcat
@@ -162,7 +164,10 @@ let app ~(notes : Db.Note.t list) ~(dimensions : Dimensions.t Bonsai.t) (local_ 
         (render_list ~width:list_w ~height:pane_h ~cursor:model.cursor notes)
     in
     let detail_box =
-      box ~focused:(not list_focused) ~title:"Detail" (render_detail ~width:detail_w selected)
+      box
+        ~focused:(not list_focused)
+        ~title:"Detail"
+        (render_detail ~width:detail_w selected)
     in
     let content = View.hcat [ list_box; detail_box ] in
     (* Backdrop so the framed panes sit on a full-screen rectangle. *)
@@ -173,8 +178,8 @@ let app ~(notes : Db.Note.t list) ~(dimensions : Dimensions.t Bonsai.t) (local_ 
     fun (event : Event.t) ->
       match event with
       | Key_press { key = Tab; mods = _ } -> inject Toggle_focus
-      | Key_press { key = (ASCII 'j' | Arrow `Down); mods = [] } -> inject Cursor_down
-      | Key_press { key = (ASCII 'k' | Arrow `Up); mods = [] } -> inject Cursor_up
+      | Key_press { key = ASCII 'j' | Arrow `Down; mods = [] } -> inject Cursor_down
+      | Key_press { key = ASCII 'k' | Arrow `Up; mods = [] } -> inject Cursor_up
       | Key_press { key = ASCII 'g'; mods = [] } -> inject Cursor_top
       | Key_press { key = ASCII 'G'; mods = [] } -> inject Cursor_bottom
       | Key_press { key = Enter; mods = [] } -> inject Focus_detail
@@ -205,8 +210,8 @@ let db_path_flag =
   db_path
 ;;
 
-(* Print a note list the way the headless subcommands report results: one line
-   per note, tab-separated, so output is greppable and stable. *)
+(* Print a note list the way the headless subcommands report results: one line per note,
+   tab-separated, so output is greppable and stable. *)
 let print_notes (notes : Db.Note.t list) =
   List.iter notes ~f:(fun n ->
     print_endline
@@ -224,9 +229,9 @@ let launch_tui db_path =
   Bonsai_term.start (app ~notes)
 ;;
 
-(* Synchronous entry point for the no-subcommand group body, which runs outside
-   the Async scheduler and must return [unit]. Boots the scheduler, runs the
-   TUI, and raises on error. *)
+(* Synchronous entry point for the no-subcommand group body, which runs outside the Async
+   scheduler and must return [unit]. Boots the scheduler, runs the TUI, and raises on
+   error. *)
 let launch_tui_blocking db_path =
   match Async.Thread_safe.block_on_async (fun () -> launch_tui db_path) with
   | Ok (Ok ()) -> ()
@@ -234,8 +239,8 @@ let launch_tui_blocking db_path =
   | Error exn -> raise exn
 ;;
 
-(* The interactive browser. Mirrors what bare `zet` does, but lets you pass -db.
-   Bare `zet` (no subcommand) runs this with the default path; see [command]. *)
+(* The interactive browser. Mirrors what bare `zet` does, but lets you pass -db. Bare
+   `zet` (no subcommand) runs this with the default path; see [command]. *)
 let tui_command =
   Async.Command.async_or_error
     ~summary:"launch the interactive TUI browser"
@@ -264,8 +269,8 @@ let list_command =
        print_notes notes)
 ;;
 
-(* Headless mirror of opening a note in the detail pane: print its full body.
-   IDENT is a numeric id or a slug; numeric strings are tried as id first. *)
+(* Headless mirror of opening a note in the detail pane: print its full body. IDENT is a
+   numeric id or a slug; numeric strings are tried as id first. *)
 let show_command =
   Command.basic
     ~summary:"print a single note's body (headless mirror of the TUI detail pane)"
@@ -299,9 +304,9 @@ let show_command =
          if not (String.is_suffix n.body ~suffix:"\n") then Out_channel.newline stdout)
 ;;
 
-(* Headless mirror of [Db.search] — full-text search printed to stdout.
-   Every TUI capability gets a subcommand like this so the CLI is a complete
-   surface, scriptable without the terminal UI. *)
+(* Headless mirror of [Db.search] — full-text search printed to stdout. Every TUI
+   capability gets a subcommand like this so the CLI is a complete surface, scriptable
+   without the terminal UI. *)
 let search_command =
   Command.basic
     ~summary:"full-text search notes (headless mirror of the TUI search)"
@@ -309,18 +314,19 @@ let search_command =
       "QUERY is a raw FTS5 MATCH expression (e.g. 'ocaml', 'type NEAR system').\n\
        Prints matching notes, best-ranked first, as: id<TAB>slug<TAB>kind<TAB>title.")
     (let%map_open.Command db_path = db_path_flag
-     and kind =
-       flag "-kind" (optional string) ~doc:"KIND restrict to journal|note|inbox"
+     and kind = flag "-kind" (optional string) ~doc:"KIND restrict to journal|note|inbox"
      and limit =
        flag "-limit" (optional_with_default 50 int) ~doc:"N max results (default: 50)"
      and query = anon ("QUERY" %: string) in
      fun () ->
-       let notes = Db.with_db db_path ~f:(fun db -> Db.search db ~query ?kind ~limit ()) in
+       let notes =
+         Db.with_db db_path ~f:(fun db -> Db.search db ~query ?kind ~limit ())
+       in
        print_notes notes)
 ;;
 
-(* Top-level: bare `zet` launches the TUI (default db); subcommands are the
-   headless mirrors. New features add a peer subcommand here. *)
+(* Top-level: bare `zet` launches the TUI (default db); subcommands are the headless
+   mirrors. New features add a peer subcommand here. *)
 let command =
   Command.group
     ~summary:{|zet — zettelkasten TUI + headless CLI|}

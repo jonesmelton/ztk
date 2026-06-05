@@ -1,6 +1,5 @@
 open! Core
 open! Bonsai_term
-
 module Db = Db
 
 val app
@@ -11,6 +10,6 @@ val app
 
 val command : Command.t
 
-(** Print notes to stdout as [id<TAB>slug<TAB>kind<TAB>title], one per line —
-    the stable, greppable format the headless subcommands emit. *)
+(** Print notes to stdout as [id<TAB>slug<TAB>kind<TAB>title], one per line — the stable,
+    greppable format the headless subcommands emit. *)
 val print_notes : Db.Note.t list -> unit
