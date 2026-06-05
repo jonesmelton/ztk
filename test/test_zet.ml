@@ -195,11 +195,11 @@ let%expect_test "app renders two panes with list focused, first note selected" =
     |}]
 ;;
 
-(* j moves the cursor down; Tab moves focus to the detail pane (title hints flip); the
+(* C-n moves the cursor down; Tab moves focus to the detail pane (title hints flip); the
    detail pane tracks the selected note's body. *)
-let%expect_test "j moves cursor, Tab switches focus to detail" =
+let%expect_test "C-n moves cursor, Tab switches focus to detail" =
   let handle = notes_handle () in
-  Bonsai_term_test.send_event handle (key (ASCII 'j'));
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'N'));
   Bonsai_term_test.send_event handle (key Tab);
   Handle.show handle;
   [%expect

@@ -75,9 +75,14 @@ let render_list ~width ~height ~cursor (notes : Db.Note.t list) =
   | [] ->
     View.center (View.text ~attrs:[ Attr.fg dim ] "(no notes)") ~within:{ width; height }
   | _ ->
+    let count = List.length notes in
+    (* Scroll offset: keep cursor in the middle of the viewport when possible. *)
+    let scroll_off = Int.max 0 (cursor - (height / 2)) in
+    let scroll_off = Int.min scroll_off (Int.max 0 (count - height)) in
+    let visible = List.sub notes ~pos:scroll_off ~len:(Int.min height (count - scroll_off)) in
     let rows =
-      List.mapi notes ~f:(fun i note ->
-        render_list_row ~width ~is_selected:(i = cursor) note)
+      List.mapi visible ~f:(fun i note ->
+        render_list_row ~width ~is_selected:(scroll_off + i = cursor) note)
     in
     View.vcat rows
 ;;
@@ -136,7 +141,7 @@ let app ~(notes : Db.Note.t list) ~(dimensions : Dimensions.t Bonsai.t) (local_ 
   let panes =
     let%arr { Dimensions.width; height } = dimensions in
     let content_width = width - 4 in
-    let list_w = Int.min 50 (content_width * 382 / 1000) |> Int.max 10 in
+    let list_w = content_width * 382 / 1000 |> Int.max 10 in
     let detail_w = Int.max 10 (content_width - list_w) in
     let pane_h = Int.max 3 (height - 2) in
     list_w, detail_w, pane_h
@@ -178,10 +183,12 @@ let app ~(notes : Db.Note.t list) ~(dimensions : Dimensions.t Bonsai.t) (local_ 
     fun (event : Event.t) ->
       match event with
       | Key_press { key = Tab; mods = _ } -> inject Toggle_focus
-      | Key_press { key = ASCII 'j' | Arrow `Down; mods = [] } -> inject Cursor_down
-      | Key_press { key = ASCII 'k' | Arrow `Up; mods = [] } -> inject Cursor_up
-      | Key_press { key = ASCII 'g'; mods = [] } -> inject Cursor_top
-      | Key_press { key = ASCII 'G'; mods = [] } -> inject Cursor_bottom
+      | Key_press { key = ASCII 'N'; mods = [ Ctrl ] }
+      | Key_press { key = Arrow `Down; mods = [] } -> inject Cursor_down
+      | Key_press { key = ASCII 'P'; mods = [ Ctrl ] }
+      | Key_press { key = Arrow `Up; mods = [] } -> inject Cursor_up
+      | Key_press { key = ASCII 'A'; mods = [ Ctrl ] } -> inject Cursor_top
+      | Key_press { key = ASCII 'E'; mods = [ Ctrl ] } -> inject Cursor_bottom
       | Key_press { key = Enter; mods = [] } -> inject Focus_detail
       | _ -> Effect.Ignore
   in

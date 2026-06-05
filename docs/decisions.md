@@ -153,6 +153,33 @@ scriptable subcommand, so the whole tool is usable without the terminal UI.
 
 ---
 
+## Keyboard conventions
+
+Emacs-style bindings throughout — both TUI and any textbox/input widgets.
+
+**Navigation (list, panes):**
+- `C-n` / `C-p` — next / previous item (down / up)
+- `C-f` / `C-b` — scroll forward / back (right / left, or page-forward where applicable)
+- `C-v` — page down; `M-v` — page up
+- `C-a` / `C-e` — beginning / end of list (jump-to-top / jump-to-bottom)
+- `C-g` — cancel / dismiss / close overlay; escape hatch from any mode
+
+**Line editing (search box, metadata input):**
+- `C-a` / `C-e` — beginning / end of line
+- `C-k` — kill to end of line
+- `C-w` — kill word backward
+- `C-d` — delete char forward; `DEL` — delete char backward
+- `C-f` / `C-b` — forward / backward char
+
+**Focus switching:** `TAB` moves between panes (as in strace_ui skeleton).
+
+**Rationale:** strace_ui's `filter_editor.ml` already implements emacs line-editing.
+The list navigation keys match what Emacs users expect from `dired`/`helm`/`ivy`.
+`C-g` is the universal bail-out — it should never be consumed by a focused widget
+when the user means "get me out of here."
+
+---
+
 ## Scope decisions
 
 **In scope for v1:** FTS search, list+detail browse, kind filter, tag filter
