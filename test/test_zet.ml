@@ -81,6 +81,62 @@ let%expect_test "get_by_id and get_by_slug" =
     |}]
 ;;
 
+(* [update_body] overwrites the body in place; the [notes_au] trigger reindexes FTS so the
+   new text is searchable and the old text is not. *)
+let%expect_test "update_body persists and reindexes FTS" =
+  let db = seeded_db () in
+  Db.update_body db ~id:2 ~body:"Rewritten body mentioning kakapo.";
+  let reread = Db.get_by_id db 2 in
+  print_s [%sexp (Option.map reread ~f:Db.Note.body : string option)];
+  [%expect {| ("Rewritten body mentioning kakapo.") |}];
+  print_endline "-- search new text --";
+  show_titles (Db.search db ~query:"kakapo" ~limit:10 ());
+  print_endline "-- search stale text --";
+  show_titles (Db.search db ~query:"functors" ~limit:10 ());
+  Db.close db;
+  [%expect
+    {|
+    -- search new text --
+    2 ocaml-notes    note    OCaml type system
+    -- search stale text --
+    |}]
+;;
+
+(* [resolve_note] backs the [show]/[edit] subcommands' IDENT argument: numeric strings hit
+   by id, non-numeric by slug, and a numeric string with no id match falls back to slug. *)
+let%expect_test "resolve_note resolves by id then slug" =
+  let db = seeded_db () in
+  let title ident =
+    match Zet.resolve_note db ident with
+    | None -> "<none>"
+    | Some n -> Db.Note.display_title n
+  in
+  printf "by id 3:      %s\n" (title "3");
+  printf "by slug:      %s\n" (title "ocaml-notes");
+  printf "missing id:   %s\n" (title "9999");
+  printf "missing slug: %s\n" (title "nope");
+  Db.close db;
+  [%expect
+    {|
+    by id 3:      Morning pages
+    by slug:      OCaml type system
+    missing id:   <none>
+    missing slug: <none>
+    |}]
+;;
+
+(* The [edit] subcommand composes [resolve_note] + [update_body]: resolve an IDENT, then
+   overwrite that note's body. This is the in-process core of [zet edit IDENT]. *)
+let%expect_test "edit composition: resolve by slug then overwrite body" =
+  let db = seeded_db () in
+  (match Zet.resolve_note db "ocaml-notes" with
+   | None -> print_endline "<unresolved>"
+   | Some n -> Db.update_body db ~id:n.id ~body:"replaced via edit path");
+  print_s [%sexp (Option.map (Db.get_by_id db 2) ~f:Db.Note.body : string option)];
+  Db.close db;
+  [%expect {| ("replaced via edit path") |}]
+;;
+
 let%expect_test "search ranks matches and filters by kind" =
   let db = seeded_db () in
   let all = Db.search db ~query:"ocaml" ~limit:10 () in
@@ -151,6 +207,7 @@ let%expect_test "app renders two panes with list focused, first note selected" =
   Handle.show handle;
   [%expect
     {|
+    (cursor ())
     ┌────────────────────────────────────────────────────────────────────────────────┐
     │╭ Notes ──────────────────────╮╭ Detail <tab> ─────────────────────────────────╮│
     ││> Hello, zet                 ││Hello, zet                                     ││
@@ -205,6 +262,7 @@ let%expect_test "C-n moves cursor, Tab switches focus to detail" =
   Handle.show handle;
   [%expect
     {|
+    (cursor ())
     ┌────────────────────────────────────────────────────────────────────────────────┐
     │╭ Notes <tab> ────────────────╮╭ Detail ───────────────────────────────────────╮│
     ││  Hello, zet                 ││OCaml type system                              ││
@@ -259,6 +317,7 @@ let%expect_test "detail pane scrolls its body when focused" =
   Handle.show handle;
   [%expect
     {|
+    (cursor ())
     ┌──────────────────────────────────────────────────────┐
     │╭ Notes <tab> ──────╮╭ Detail ───────────────────────╮│
     ││> Hello, zet       ││Hello, zet                     ││
@@ -277,6 +336,7 @@ let%expect_test "detail pane scrolls its body when focused" =
   Handle.show handle;
   [%expect
     {|
+    (cursor ())
     ┌──────────────────────────────────────────────────────┐
     │╭ Notes <tab> ──────╮╭ Detail ───────────────────────╮│
     ││> Hello, zet       ││Hello, zet                     ││
@@ -295,6 +355,17 @@ let%expect_test "detail pane scrolls its body when focused" =
 (* Type each char of [s] into a handle, one Insert per ASCII byte. *)
 let type_string handle s =
   String.iter s ~f:(fun c -> Bonsai_term_test.send_event handle (key (ASCII c)))
+;;
+
+(* Like [type_string], but recomputes a frame between keystrokes. The text editor's insert
+   reads-then-writes its buffer, so several inserts dispatched within one stabilization
+   collapse onto the same pre-burst state and all but one are lost. A live terminal
+   renders (and so stabilizes) between keys; this mimics that so editor input lands in
+   order. *)
+let type_string_editor handle s =
+  String.iter s ~f:(fun c ->
+    Bonsai_term_test.send_event handle (key (ASCII c));
+    Handle.recompute_view handle)
 ;;
 
 (* The sanitizer maps arbitrary input to a valid FTS5 MATCH: barewords become quoted
@@ -334,6 +405,7 @@ let%expect_test "slash enters search mode with an empty query" =
   Handle.show handle;
   [%expect
     {|
+    (cursor ())
     ┌──────────────────────────────────────────────────────┐
     │╭ Search: ▏ ────────╮╭ Detail <tab> ─────────────────╮│
     ││                   ││(no note selected)             ││
@@ -358,6 +430,7 @@ let%expect_test "typing a matching query shows ranked results" =
   Handle.show handle;
   [%expect
     {|
+    (cursor ())
     ┌──────────────────────────────────────────────────────┐
     │╭ Search: ocaml▏ ───╮╭ Detail <tab> ─────────────────╮│
     ││> OCaml type system││OCaml type system              ││
@@ -382,13 +455,14 @@ let%expect_test "non-matching query shows (no matches)" =
   Handle.show handle;
   [%expect
     {|
+    (cursor (((position ((x 22) (y 1))) (kind Bar_blinking))))
     ┌──────────────────────────────────────────────────────┐
-    │╭ Search: zznope▏ ──╮╭ Detail <tab> ─────────────────╮│
-    ││                   ││(no note selected)             ││
-    ││                   ││                               ││
-    ││                   ││                               ││
-    ││   (no matches)    ││                               ││
-    ││                   ││                               ││
+    │╭ Notes ────────────╮╭ Edit  C-x C-s save  C-g cancel │
+    ││> Hello, zet       ││This is the first seeded note  ││
+    ││  OCaml type system││. It exists so the TUI has so  ││
+    ││  Morning pages    ││mething to render while the d  ││
+    ││  Quick capture    ││ata layer is wired up.         ││
+    ││  2026-05-28       ││                               ││
     ││                   ││                               ││
     ││                   ││                               ││
     ││                   ││                               ││
@@ -407,6 +481,7 @@ let%expect_test "backspace shortens the query and updates results" =
   Handle.show handle;
   [%expect
     {|
+    (cursor ())
     ┌──────────────────────────────────────────────────────┐
     │╭ Search: ocaml▏ ───╮╭ Detail <tab> ─────────────────╮│
     ││> OCaml type system││OCaml type system              ││
@@ -432,6 +507,7 @@ let%expect_test "escape exits search back to the browse corpus" =
   Handle.show handle;
   [%expect
     {|
+    (cursor ())
     ┌──────────────────────────────────────────────────────┐
     │╭ Notes ────────────╮╭ Detail <tab> ─────────────────╮│
     ││> Hello, zet       ││Hello, zet                     ││
@@ -459,6 +535,7 @@ let%expect_test "select a result and view it in the detail pane" =
   Handle.show handle;
   [%expect
     {|
+    (cursor ())
     ┌──────────────────────────────────────────────────────┐
     │╭ Search: l▏ <tab> ─╮╭ Detail ───────────────────────╮│
     ││> OCaml type system││OCaml type system              ││
@@ -486,6 +563,7 @@ let%expect_test "garbage query does not crash the search" =
   Handle.show handle;
   [%expect
     {|
+    (cursor ())
     ┌──────────────────────────────────────────────────────┐
     │╭ Search: "-*▏ ─────╮╭ Detail <tab> ─────────────────╮│
     ││                   ││(no note selected)             ││
@@ -522,6 +600,7 @@ let%expect_test "search highlights matched terms in list and detail" =
   Handle.show handle;
   [%expect
     {|
+    (cursor ())
     (off fg:cyan)╭(off fg:cyan +bold) Search: oc▏ (off fg:cyan)──────(off fg:cyan)╮(off fg:gray)╭(off fg:gray +bold) Detail <tab> (off fg:gray)─────────────────(off fg:gray)╮
     (off fg:cyan)│(off fg:cyan +bold)> (off fg:yellow +bold)OCaml(off fg:cyan +bold) (off fg:cyan +bold)type(off fg:cyan +bold) (off fg:cyan +bold)system(off fg:cyan)│(off fg:gray)│(off fg:yellow +bold)OCaml(off fg:cyan +bold) (off fg:cyan +bold)type(off fg:cyan +bold) (off fg:cyan +bold)system(off fg:gray)              (off fg:gray)│
     (off fg:cyan)│(off)  (off)Morning(off) (off)pages(off fg:cyan)    (off fg:cyan)│(off fg:gray)│(off fg:gray)#2  note(off fg:gray)                       (off fg:gray)│
@@ -542,18 +621,16 @@ let%expect_test "? opens and closes the help overlay" =
   Handle.show handle;
   [%expect
     {|
+    (cursor ())
     ┌────────────────────────────────────────────────────────────────────────────────┐
     │╭ Notes ──────────────────────╮╭ Detail <tab> ─────────────────────────────────╮│
     ││> Hello, zet                 ││Hello, zet                                     ││
     ││  OCaml type system          ││#1  note                                       ││
     ││  Morning pages              ││slug: hello-zet                                ││
     ││  Quick capture              ││date: 2026-06-03                               ││
-    ││  2026-05-28                 ││                                               ││
-    ││                             ││This is the first seeded note. It exists so the││
-    ││                             ││TUI has something to render while the data     ││
-    ││                ╭ Keybindings ───────────────────────────────╮                ││
-    ││                │ Navigation                                 │                ││
-    ││                │ C-n / C-p      next / previous note        │                ││
+    ││  2026-05-28    ╭ Keybindings ───────────────────────────────╮                ││
+    ││                │ Navigation                                 │It exists so the││
+    ││                │ C-n / C-p      next / previous note        │le the data     ││
     ││                │ C-a / C-e      first / last note           │                ││
     ││                │ Tab            switch list / detail pane   │                ││
     ││                │ Enter          focus the detail pane       │                ││
@@ -571,12 +648,15 @@ let%expect_test "? opens and closes the help overlay" =
     ││                │ Enter          commit query, focus results │                ││
     ││                │ Esc            cancel search               │                ││
     ││                │                                            │                ││
+    ││                │ Editing                                    │                ││
+    ││                │ e              edit selected note's body   │                ││
+    ││                │ C-x C-s        save changes                │                ││
+    ││                │ C-g            cancel without saving       │                ││
+    ││                │                                            │                ││
     ││                │ General                                    │                ││
     ││                │ ?              toggle this help            │                ││
     ││                │ C-g / Esc / q  close help                  │                ││
     ││                ╰────────────────────────────────────────────╯                ││
-    ││                             ││                                               ││
-    ││                             ││                                               ││
     ││                             ││                                               ││
     ││                             ││                                               ││
     ││                             ││                                               ││
@@ -589,6 +669,7 @@ let%expect_test "? opens and closes the help overlay" =
   Handle.show handle;
   [%expect
     {|
+    (cursor ())
     ┌────────────────────────────────────────────────────────────────────────────────┐
     │╭ Notes ──────────────────────╮╭ Detail <tab> ─────────────────────────────────╮│
     ││> Hello, zet                 ││Hello, zet                                     ││
@@ -627,6 +708,106 @@ let%expect_test "? opens and closes the help overlay" =
     ││                             ││                                               ││
     ││                             ││                                               ││
     ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    │╰─────────────────────────────╯╰───────────────────────────────────────────────╯│
+    └────────────────────────────────────────────────────────────────────────────────┘
+    |}]
+;;
+
+(* [e] opens the editor in the detail pane, seeded with the selected note's body. Typing
+   appends to it; [C-x C-s] writes the body to the DB, reloads the corpus, and returns to
+   Browse — the detail pane then shows the persisted text. The terminal cursor is reported
+   only while editing (the [(cursor ...)] line). *)
+let%expect_test "e opens editor, C-x C-s saves the body" =
+  let handle = notes_handle ~initial_dimensions:{ width = 80; height = 12 } () in
+  Bonsai_term_test.send_event handle (key (ASCII 'e'));
+  type_string_editor handle " EDITED";
+  Handle.show handle;
+  [%expect
+    {|
+    (cursor (((position ((x 32) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 33) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 34) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 35) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 36) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 37) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 38) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 38) (y 1))) (kind Bar_blinking))))
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │╭ Notes ──────────────────────╮╭ Edit  C-x C-s save  C-g cancel ───────────────╮│
+    ││> Hello, zet                 ││EDITEDThis is the first seeded note. It exist  ││
+    ││  OCaml type system          ││s so the TUI has something to render while th  ││
+    ││  Morning pages              ││e data layer is wired up.                      ││
+    ││  Quick capture              ││                                               ││
+    ││  2026-05-28                 ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    │╰─────────────────────────────╯╰───────────────────────────────────────────────╯│
+    └────────────────────────────────────────────────────────────────────────────────┘
+    |}];
+  (* Save: C-x then C-s with NO frame between them. The chord's armed-bit lives in a state
+     machine read inside apply_action, so the second key sees the first key's effect even
+     when they're dispatched back-to-back (the batching case that broke the old
+     closure-based chord). Returns to Browse; the detail pane shows the persisted body,
+     read back from the reloaded corpus. *)
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'X'));
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'S'));
+  Handle.show handle;
+  [%expect
+    {|
+    (cursor ())
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │╭ Notes ──────────────────────╮╭ Detail <tab> ─────────────────────────────────╮│
+    ││> Hello, zet                 ││Hello, zet                                     ││
+    ││  OCaml type system          ││#1  note                                       ││
+    ││  Morning pages              ││slug: hello-zet                                ││
+    ││  Quick capture              ││date: 2026-06-03                               ││
+    ││  2026-05-28                 ││                                               ││
+    ││                             ││EDITEDThis is the first seeded note. It exists ││
+    ││                             ││so the TUI has something to render while the   ││
+    ││                             ││data layer is wired up.                        ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    │╰─────────────────────────────╯╰───────────────────────────────────────────────╯│
+    └────────────────────────────────────────────────────────────────────────────────┘
+    |}]
+;;
+
+(* [C-g] in Edit mode discards: the body is not written, and the detail pane shows the
+   original text again. *)
+let%expect_test "C-g cancels an edit without saving" =
+  let handle = notes_handle ~initial_dimensions:{ width = 80; height = 12 } () in
+  Bonsai_term_test.send_event handle (key (ASCII 'e'));
+  type_string_editor handle " THROWAWAY";
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'G'));
+  Handle.show handle;
+  [%expect
+    {|
+    (cursor (((position ((x 32) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 33) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 34) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 35) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 36) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 37) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 38) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 39) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 40) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 41) (y 1))) (kind Bar_blinking))))
+    (cursor ())
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │╭ Notes ──────────────────────╮╭ Detail <tab> ─────────────────────────────────╮│
+    ││> Hello, zet                 ││Hello, zet                                     ││
+    ││  OCaml type system          ││#1  note                                       ││
+    ││  Morning pages              ││slug: hello-zet                                ││
+    ││  Quick capture              ││date: 2026-06-03                               ││
+    ││  2026-05-28                 ││                                               ││
+    ││                             ││This is the first seeded note. It exists so the││
+    ││                             ││TUI has something to render while the data     ││
+    ││                             ││layer is wired up.                             ││
     ││                             ││                                               ││
     ││                             ││                                               ││
     │╰─────────────────────────────╯╰───────────────────────────────────────────────╯│

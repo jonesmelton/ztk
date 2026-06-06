@@ -173,6 +173,13 @@ Emacs-style bindings throughout — both TUI and any textbox/input widgets.
 
 **Focus switching:** `TAB` moves between panes (as in strace_ui skeleton).
 
+**Editing (body):**
+- `e` (in Browse) — open the selected note's body in the editor (detail pane)
+- `C-x C-s` — save the edited body to the DB
+- `C-g` — cancel editing, discard changes
+- Inside the editor, standard emacs line/word editing applies (provided by
+  `bonsai_term_text_editor`'s emacs keybindings, not re-implemented here).
+
 **Help:** `?` (in Browse) toggles a centered keybinding cheat-sheet overlay;
 `?` / `C-g` / `Esc` / `q` dismiss it. The overlay's binding list is built from
 `help_sections` in `src/zet.ml` — keep it in sync with this section.
@@ -188,6 +195,18 @@ when the user means "get me out of here."
 
 **In scope for v1:** FTS search, list+detail browse, kind filter, tag filter
 (JSON), view body, add/edit tags, import/export bodies to files.
+
+**Body editing (added 2026-06-05, scope change).** Originally zet was "read-mostly
++ metadata only" — body authoring lived elsewhere (see the intro, ~line 13). We
+since added in-app body editing: `e` opens the selected note in a `bonsai_term`
+text editor (zed-backed, emacs keybindings) in the detail pane; `C-x C-s` saves,
+`C-g` cancels. Headless mirror: `zet edit IDENT` (body from `-body`, `-file`, or
+stdin). Caveats:
+- **Naive overwrite, no revision history.** `Db.update_body` is a plain `UPDATE`;
+  edits are destructive until content-addressing (see `content-addressing.md`)
+  lands. The FTS index stays correct via the existing `notes_au` trigger.
+- The intro paragraph's "not an editor" framing is now historical — bodies *are*
+  editable; richer authoring (templates, multi-note, links) still lives elsewhere.
 
 **Explicitly deferred until the schema changes** (user's call: "any feature not
 supported by the current schema we will defer; we can change the schema later"):

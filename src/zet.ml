@@ -89,6 +89,7 @@ module Mode = struct
     | Browse
     | Search
     | Help (* full-screen keybinding cheat-sheet overlay; dismiss back to Browse *)
+    | Edit (* editing the selected note's body; the text editor captures the keyboard *)
   [@@deriving sexp_of, equal]
 end
 
@@ -112,11 +113,23 @@ module Model = struct
     ; detail_scroll : int (* top line offset of the detail body, in wrapped lines *)
     ; mode : Mode.t
     ; editor : Editor.t
+    ; editing_id : int option
+    (* id of the note being edited in [Edit] mode; pins the save target so a corpus reload
+       can't change which note a save writes to. The [C-x C-s] chord's armed-bit lives in
+       a separate [Bonsai.state_machine] ([chord] in [app]), not here, so it stays
+       batch-safe.
+    *)
     }
   [@@deriving sexp_of, equal]
 
   let initial =
-    { cursor = 0; focus = List; detail_scroll = 0; mode = Browse; editor = Editor.empty }
+    { cursor = 0
+    ; focus = List
+    ; detail_scroll = 0
+    ; mode = Browse
+    ; editor = Editor.empty
+    ; editing_id = None
+    }
   ;;
 end
 
@@ -203,6 +216,10 @@ let route (model : Model.t) (event : Event.t) : Action.t option =
      | Key_press { key = ASCII 'E'; mods = [ Ctrl ] } -> Some Bottom
      | Key_press { key = Enter; mods = [] } -> Some Focus_detail
      | _ -> None)
+  (* Edit mode is driven by the text editor's own handler plus the save/cancel chord. The
+     chord lives in a dedicated [Bonsai.state_machine] (see [chord] in [app]) so it reads
+     fresh state and can't be defeated by event batching; [route] has nothing for Edit. *)
+  | Edit -> None
 ;;
 
 (* Pure reducer. [count] is the corpus size and [detail_max] the largest valid detail
@@ -477,7 +494,7 @@ let render_detail ?(terms = []) ~width ~height ~scroll (note : Db.Note.t option)
    multibyte). *)
 let list_title ~budget (model : Model.t) =
   match model.mode with
-  | Browse | Help -> "Notes"
+  | Browse | Help | Edit -> "Notes"
   | Search ->
     let prefix = "Search: " in
     let { Editor.buf; cursor } = model.editor in
@@ -512,6 +529,11 @@ let help_sections =
       ; "C-d / DEL", "delete char forward / back"
       ; "Enter", "commit query, focus results"
       ; "Esc", "cancel search"
+      ] )
+  ; ( "Editing"
+    , [ "e", "edit selected note's body"
+      ; "C-x C-s", "save changes"
+      ; "C-g", "cancel without saving"
       ] )
   ; "General", [ "?", "toggle this help"; "C-g / Esc / q", "close help" ]
   ]
@@ -559,9 +581,18 @@ let render_help ~width ~height =
 let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
   : view:View.t Bonsai.t * handler:(Event.t -> unit Effect.t) Bonsai.t
   =
-  (* Browse corpus: loaded once for the app's lifetime. The live handle stays open so the
-     search path can re-query; see [launch_tui]. *)
-  let notes = Db.list_all db in
+  (* Browse corpus, held as Bonsai state so an edit can refresh it without restarting. The
+     list value is its own immutable box: [reload_notes] re-pulls a *fresh* list, so the
+     phys_equal cutoff sees the change (see the virtual_list perf note in CLAUDE.md). The
+     live handle stays open so both search and reload can re-query; see [launch_tui]. *)
+  (* No [~equal]: the cutoff is [phys_equal] by design. A reloaded corpus is a freshly
+     allocated list, so identity differs and dependents recompute; an unchanged corpus
+     keeps the same value and is cut off. *)
+  let notes, set_notes = Bonsai.state' (Db.list_all db) graph in
+  let reload_notes =
+    let%arr set_notes in
+    set_notes (fun _ -> Db.list_all db)
+  in
   let model, set_model =
     Bonsai.state'
       Model.initial
@@ -589,10 +620,10 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
   (* The active list backs both selection and rendering: results in Search, corpus in
      Browse. Cursor/scroll clamping is computed against whichever is active. *)
   let active =
-    let%arr model and results in
+    let%arr model and results and notes in
     match model.mode with
     | Search -> results
-    | Browse | Help -> notes
+    | Browse | Help | Edit -> notes
   in
   (* Border boxes cost 2 cols each (left+right); two boxes = 4. Split the rest
      golden-ratio: list ~38%, detail ~62%. *)
@@ -603,6 +634,98 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     let detail_w = Int.max 10 (content_width - list_w) in
     let pane_h = Int.max 3 (height - 2) in
     list_w, detail_w, pane_h
+  in
+  (* The text editor component. Instantiated unconditionally (Bonsai graph nodes are
+     static): it always exists, but is only rendered and fed keys in [Edit] mode. On entry
+     we seed it with the note body via [set_text]; on save we read [editor_text]. Sized to
+     the detail pane's interior. *)
+  let editor_width =
+    let%arr _, detail_w, _ = panes in
+    Int.max 1 (detail_w - 2)
+  in
+  let editor_max_height =
+    let%arr _, _, pane_h = panes in
+    Int.max 1 pane_h
+  in
+  let%tydi { text = editor_text
+           ; send_actions = editor_send_actions
+           ; view = editor_view
+           ; cursor = _
+           ; set_text = editor_set_text
+           ; rope = _
+           ; get_cursor_position = editor_get_cursor_position
+           }
+    =
+    Bonsai_term_text_editor.component
+      ~text_attrs:(Bonsai.return [])
+      ~width:editor_width
+      ~max_height:editor_max_height
+      graph
+  in
+  let editor_handler =
+    Bonsai_term_text_editor.Emacs.emacs_keybindings_handler editor_send_actions graph
+  in
+  let editor_handler =
+    Bonsai_term_text_editor.Buffer_and_apply_paste_events_in_bulk.f
+      ~send_actions:editor_send_actions
+      ~handler:editor_handler
+      graph
+  in
+  (* The [C-x C-s] save chord lives in its own state machine so its armed-bit is read and
+     updated inside [apply_action] — against the freshly-applied model — rather than from
+     a handler closure that's only as fresh as the last frame. That matters because the
+     bonsai_term run loop can deliver several keystrokes from one input read and dispatch
+     them all through a single frame's handler (see driver.ml): a [C-x] then [C-s]
+     arriving in the same batch would, in a closure that captured [pending = false], miss
+     the chord. Here each action sees the prior action's result, so batching is safe.
+
+     Input carries what the effects need: the id being edited (pins the save target), the
+     live editor text (the new body), and the two effects to run on completion — refresh
+     the corpus and drop back to Browse. *)
+  let to_browse =
+    let%arr set_model in
+    set_model (fun (m : Model.t) -> { m with mode = Browse; editing_id = None })
+  in
+  let chord_input =
+    let%arr model and editor_text and reload_notes and to_browse in
+    model.editing_id, editor_text, reload_notes, to_browse
+  in
+  let module Chord = struct
+    type t =
+      | Arm (* [C-x]: arm the chord *)
+      | Disarm (* any non-chord key: cancel a half-typed [C-x] without leaving Edit *)
+      | Save (* [C-s]: if armed, persist + leave Edit *)
+      | Cancel (* [C-g]: leave Edit without saving *)
+    [@@deriving sexp_of]
+  end
+  in
+  let _pending, inject_chord =
+    Bonsai.state_machine_with_input
+      ~default_model:false
+      ~sexp_of_model:[%sexp_of: bool]
+      ~sexp_of_action:[%sexp_of: Chord.t]
+      ~apply_action:(fun ctx input armed (action : Chord.t) ->
+        match input with
+        | Bonsai.Computation_status.Inactive -> armed
+        | Active (editing_id, editor_text, reload_notes, to_browse) ->
+          (match action with
+           | Arm -> true
+           | Disarm -> false
+           | Cancel ->
+             Bonsai.Apply_action_context.schedule_event ctx to_browse;
+             false
+           | Save ->
+             (* Only an armed [C-s] saves; a bare [C-s] is inert. *)
+             (match armed, editing_id with
+              | true, Some id ->
+                Db.update_body db ~id ~body:editor_text;
+                Bonsai.Apply_action_context.schedule_event
+                  ctx
+                  (Effect.all_unit [ reload_notes; to_browse ])
+              | _ -> ());
+             false))
+      chord_input
+      graph
   in
   (* A single inject takes the raw key and does mode/focus routing inside [set_model], so
      it reads the live model rather than a handler value that's only as fresh as the last
@@ -626,8 +749,10 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
   let view =
     let%arr model
     and active
+    and editor_view
     and { Dimensions.width; height } = dimensions
     and list_w, detail_w, pane_h = panes in
+    let editing = [%equal: Mode.t] model.mode Edit in
     let selected = List.nth active model.cursor in
     let list_focused = [%equal: Focus.t] model.focus List in
     let searching = [%equal: Mode.t] model.mode Search in
@@ -666,15 +791,25 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
            active)
     in
     let detail_box =
-      box
-        ~focused:(not list_focused)
-        ~title:"Detail"
-        (render_detail
-           ~terms
-           ~width:detail_w
-           ~height:pane_h
-           ~scroll:model.detail_scroll
-           selected)
+      if editing
+      then
+        (* Editing takes over the detail pane: the editor's own view replaces the
+           read-only body, the box is focused, and the title shows the save/cancel chord.
+           Pinned to the pane geometry so the frame doesn't resize to the text. *)
+        box
+          ~focused:true
+          ~title:"Edit  C-x C-s save  C-g cancel"
+          (fit ~width:detail_w ~height:pane_h editor_view)
+      else
+        box
+          ~focused:(not list_focused)
+          ~title:"Detail"
+          (render_detail
+             ~terms
+             ~width:detail_w
+             ~height:pane_h
+             ~scroll:model.detail_scroll
+             selected)
     in
     let content = View.hcat [ list_box; detail_box ] in
     (* In Help mode the cheat-sheet sits on top of the panes, which stay visible behind
@@ -682,16 +817,71 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     let overlay =
       match model.mode with
       | Help -> [ render_help ~width ~height ]
-      | Browse | Search -> []
+      | Browse | Search | Edit -> []
     in
     (* Backdrop so the framed panes sit on a full-screen rectangle. *)
     View.zcat (overlay @ [ content; View.rectangle ~width ~height () ])
   in
-  (* The handler just forwards every key to [inject]; all mode/focus routing happens in
-     the reducer against the live model (see [route] / [inject]). *)
+  (* The handler routes by mode. Browse/Search/Help go through [inject] (the pure
+     reducer). Edit is split: the save/cancel chord goes to [inject_chord] (the batch-safe
+     state machine), and every other key is delegated to the text editor's own handler.
+     Opening the editor ([e]) seeds it with the note body and flips mode; that's a single
+     key, so routing it through [set_model] is fine. *)
   let handler =
-    let%arr inject in
-    fun (event : Event.t) -> inject event
+    let%arr inject
+    and set_model
+    and model
+    and active
+    and editor_handler
+    and editor_set_text
+    and inject_chord in
+    fun (event : Event.t) ->
+      let discard eff = Effect.map eff ~f:(fun (_ : Captured_or_ignored.t) -> ()) in
+      match model.mode with
+      | Browse | Search | Help ->
+        (* [e] on a selected note opens the editor seeded with its body. Everything else
+           in these modes is the reducer's job. *)
+        (match event, model.mode with
+         | Key_press { key = ASCII 'e'; mods = [] }, Browse ->
+           (match List.nth active model.cursor with
+            | None -> Effect.return ()
+            | Some (note : Db.Note.t) ->
+              Effect.all_unit
+                [ editor_set_text note.body
+                ; set_model (fun (m : Model.t) ->
+                    { m with mode = Edit; editing_id = Some note.id })
+                ])
+         | _ -> inject event)
+      | Edit ->
+        (match event with
+         | Key_press { key = ASCII 'G'; mods = [ Ctrl ] } -> inject_chord Cancel
+         | Key_press { key = ASCII 'X'; mods = [ Ctrl ] } -> inject_chord Arm
+         | Key_press { key = ASCII 'S'; mods = [ Ctrl ] } -> inject_chord Save
+         (* Any other key disarms a half-typed chord and goes to the editor. Both run: the
+            disarm is a no-op when not armed. *)
+         | _ -> Effect.all_unit [ inject_chord Disarm; discard (editor_handler event) ])
+  in
+  (* Track the terminal cursor to the editor's caret while editing; clear it otherwise so
+     the block cursor doesn't linger over the read-only panes. [get_cursor_position]
+     returns coordinates relative to the *whole* view it's given, so we pass the composed
+     app [view] (which embeds [editor_view]) — passing the bare editor view would yield
+     editor-local coords and place the cursor at the screen's top-left. Runs after each
+     frame so it sees the just-rendered view. *)
+  let () =
+    let update_cursor =
+      let%arr set_cursor = Effect.set_cursor graph
+      and model
+      and view
+      and editor_get_cursor_position in
+      match model.mode with
+      | Browse | Search | Help -> set_cursor None
+      | Edit ->
+        (match editor_get_cursor_position view with
+         | None -> set_cursor None
+         | Some ({ x; y } : Position.t) ->
+           set_cursor (Some { position = { x; y }; kind = Bar_blinking }))
+    in
+    Bonsai.Edge.after_display update_cursor graph
   in
   ~view, ~handler
 ;;
@@ -785,6 +975,18 @@ let list_command =
        print_notes notes)
 ;;
 
+(* Resolve an IDENT (as accepted by [show]/[edit]) to a note: a numeric string is tried as
+   an id first, then as a slug; a non-numeric string is a slug. Shared so every
+   IDENT-taking subcommand resolves the same way. *)
+let resolve_note db ident =
+  match Int.of_string_opt ident with
+  | Some id ->
+    (match Db.get_by_id db id with
+     | Some _ as n -> n
+     | None -> Db.get_by_slug db ident)
+  | None -> Db.get_by_slug db ident
+;;
+
 (* Headless mirror of opening a note in the detail pane: print its full body. IDENT is a
    numeric id or a slug; numeric strings are tried as id first. *)
 let show_command =
@@ -796,15 +998,7 @@ let show_command =
     (let%map_open.Command db_path = db_path_flag
      and ident = anon ("IDENT" %: string) in
      fun () ->
-       let note =
-         Db.with_db db_path ~f:(fun db ->
-           match Int.of_string_opt ident with
-           | Some id ->
-             (match Db.get_by_id db id with
-              | Some _ as n -> n
-              | None -> Db.get_by_slug db ident)
-           | None -> Db.get_by_slug db ident)
-       in
+       let note = Db.with_db db_path ~f:(fun db -> resolve_note db ident) in
        match note with
        | None ->
          prerr_endline (sprintf "no note matching %S" ident);
@@ -841,6 +1035,38 @@ let search_command =
        print_notes notes)
 ;;
 
+(* Headless mirror of editing a note's body in the TUI. IDENT resolves like [show]. The
+   new body comes from [-body] (inline), else [-file PATH], else stdin — so it scripts as
+   [echo ... | zet edit 5] or [zet edit my-slug -file note.md]. Naive overwrite, no
+   revision history (see [Db.update_body]). Exits nonzero if no note matches. *)
+let edit_command =
+  Command.basic
+    ~summary:"replace a note's body (headless mirror of the TUI editor)"
+    ~readme:(fun () ->
+      "IDENT is a note id (integer) or a slug. The replacement body is read from\n\
+       -body STR if given, else from -file PATH, else from stdin. Overwrites the\n\
+       body in place (no revision history). Exits nonzero if no note matches.")
+    (let%map_open.Command db_path = db_path_flag
+     and ident = anon ("IDENT" %: string)
+     and body = flag "-body" (optional string) ~doc:"STR new body text (inline)"
+     and file =
+       flag "-file" (optional string) ~doc:"PATH read the new body from this file"
+     in
+     fun () ->
+       let new_body =
+         match body, file with
+         | Some b, _ -> b
+         | None, Some path -> In_channel.read_all path
+         | None, None -> In_channel.input_all In_channel.stdin
+       in
+       Db.with_db db_path ~f:(fun db ->
+         match resolve_note db ident with
+         | None ->
+           prerr_endline (sprintf "no note matching %S" ident);
+           exit 1
+         | Some n -> Db.update_body db ~id:n.id ~body:new_body))
+;;
+
 (* Top-level: bare `zet` launches the TUI (default db); subcommands are the headless
    mirrors. New features add a peer subcommand here. *)
 let command =
@@ -855,5 +1081,6 @@ let command =
     ; "list", list_command
     ; "show", show_command
     ; "search", search_command
+    ; "edit", edit_command
     ]
 ;;

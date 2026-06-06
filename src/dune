@@ -5,6 +5,7 @@
   bonsai
   bonsai_term
   bonsai_term_components.border_box
+  bonsai_term_components.text_editor
   core
   core_unix
   sqlite3
