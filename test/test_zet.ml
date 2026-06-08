@@ -107,7 +107,7 @@ let%expect_test "update_body persists and reindexes FTS" =
 let%expect_test "resolve_note resolves by id then slug" =
   let db = seeded_db () in
   let title ident =
-    match Zet.resolve_note db ident with
+    match Zet.Cli.resolve_note db ident with
     | None -> "<none>"
     | Some n -> Db.Note.display_title n
   in
@@ -129,7 +129,7 @@ let%expect_test "resolve_note resolves by id then slug" =
    overwrite that note's body. This is the in-process core of [zet edit IDENT]. *)
 let%expect_test "edit composition: resolve by slug then overwrite body" =
   let db = seeded_db () in
-  (match Zet.resolve_note db "ocaml-notes" with
+  (match Zet.Cli.resolve_note db "ocaml-notes" with
    | None -> print_endline "<unresolved>"
    | Some n -> Db.update_body db ~id:n.id ~body:"replaced via edit path");
   print_s [%sexp (Option.map (Db.get_by_id db 2) ~f:Db.Note.body : string option)];
@@ -186,7 +186,7 @@ let%expect_test "print_notes emits the headless tab-separated format" =
   let db = seeded_db () in
   let notes = Db.search db ~query:"ocaml" ~limit:10 () in
   Db.close db;
-  Zet.print_notes notes;
+  Zet.Cli.print_notes notes;
   [%expect
     {|
     2	ocaml-notes	note	OCaml type system
@@ -194,12 +194,12 @@ let%expect_test "print_notes emits the headless tab-separated format" =
     |}]
 ;;
 
-(* The handle keeps the seeded DB open for its lifetime: [Zet.app] reads the corpus up
+(* The handle keeps the seeded DB open for its lifetime: [Zet.App.app] reads the corpus up
    front but also re-queries it live for search, so the connection must stay alive. Tests
    are short-lived, so we don't bother closing it. *)
 let notes_handle ?initial_dimensions () =
   let db = seeded_db () in
-  Bonsai_term_test.create_handle ?initial_dimensions (Zet.app ~db)
+  Bonsai_term_test.create_handle ?initial_dimensions (Zet.App.app ~db)
 ;;
 
 let%expect_test "app renders two panes with list focused, first note selected" =
@@ -587,7 +587,7 @@ let ansi_handle ?initial_dimensions () =
   Bonsai_term_test.create_handle
     ?initial_dimensions
     ~capability:Bonsai_term_test.Capability.Ansi
-    (Zet.app ~db)
+    (Zet.App.app ~db)
 ;;
 
 (* Matched query terms are emphasized wherever they appear, by prefix and
@@ -904,4 +904,205 @@ let%expect_test "C-Space marks, M-w copies the region, C-y yanks it back" =
     │╰─────────────────────────────╯╰───────────────────────────────────────────────╯│
     └────────────────────────────────────────────────────────────────────────────────┘
     |}]
+;;
+
+(* ── Pure-core unit tests ─────────────────────────────────────────────────────────────
+   These drive the modules the split isolated — [Model] (reducer + routing), [Render]
+   (layout helpers), [Fts_query] — directly, without going through a rendered frame. They
+   pin behavior that the app-level snapshots above only exercise transitively. *)
+
+module Model = Zet.Model
+module Render = Zet.Render
+
+(* A model in Browse with the list focused at [cursor]; the rest is initial. *)
+let browse_model ?(cursor = 0) ?(detail_scroll = 0) () =
+  { Model.Model.initial with cursor; detail_scroll }
+;;
+
+(* A model in Search whose query buffer is [buf] with the edit cursor at [cursor]
+   (defaulting to end of buffer). *)
+let search_model ?cursor buf =
+  let cursor = Option.value cursor ~default:(String.length buf) in
+  { Model.Model.initial with mode = Search; editor = { buf; cursor } }
+;;
+
+let apply ?(count = 5) ?(detail_max = 0) model action =
+  Model.apply_action_pure ~count ~detail_max model action
+;;
+
+let%expect_test "list cursor clamps at both ends" =
+  let m = browse_model ~cursor:0 () in
+  (* Up from the top stays at 0. *)
+  print_s [%sexp ((apply m Up).cursor : int)];
+  [%expect {| 0 |}];
+  (* Down from the top advances. *)
+  print_s [%sexp ((apply m Down).cursor : int)];
+  [%expect {| 1 |}];
+  (* Bottom goes to count-1; a further Down can't exceed it. *)
+  let last = apply m Bottom in
+  print_s [%sexp (last.cursor : int)];
+  [%expect {| 4 |}];
+  print_s [%sexp ((apply last Down).cursor : int)];
+  [%expect {| 4 |}]
+;;
+
+(* With the detail pane focused, the nav keys scroll the body and clamp to [detail_max]
+   rather than moving the list cursor. *)
+let%expect_test "detail scroll clamps to detail_max when detail focused" =
+  let m = { (browse_model ()) with focus = Detail; detail_scroll = 0 } in
+  print_s [%sexp ((apply ~detail_max:2 m Up).detail_scroll : int)];
+  [%expect {| 0 |}];
+  let down = apply ~detail_max:2 m Down in
+  print_s [%sexp (down.detail_scroll : int)];
+  [%expect {| 1 |}];
+  let bottom = apply ~detail_max:2 m Bottom in
+  print_s [%sexp (bottom.detail_scroll : int)];
+  [%expect {| 2 |}];
+  print_s [%sexp ((apply ~detail_max:2 bottom Down).detail_scroll : int)];
+  [%expect {| 2 |}];
+  (* The list cursor is untouched while detail is focused. *)
+  print_s [%sexp (bottom.cursor : int)];
+  [%expect {| 0 |}]
+;;
+
+let%expect_test "start/exit search resets cursor, scroll, and query buffer" =
+  let dirty = { (search_model "ocaml") with cursor = 3; detail_scroll = 4 } in
+  let started = apply dirty Start_search in
+  print_s
+    [%sexp
+      ((started.mode, started.editor.buf, started.cursor, started.detail_scroll)
+       : Model.Mode.t * string * int * int)];
+  [%expect {| (Search "" 0 0) |}];
+  let exited = apply dirty Exit_search in
+  print_s
+    [%sexp
+      ((exited.mode, exited.editor.buf, exited.cursor, exited.detail_scroll)
+       : Model.Mode.t * string * int * int)];
+  [%expect {| (Browse "" 0 0) |}]
+;;
+
+(* Each query-edit action against the buffer "ocaml". Reports buf + edit cursor so insert,
+   delete, kill, and motion are all pinned in one place. *)
+let%expect_test "query-edit actions" =
+  let show (m : Model.Model.t) =
+    print_s [%sexp ((m.editor.buf, m.editor.cursor) : string * int)]
+  in
+  (* Insert at end. *)
+  show (apply (search_model "ocaml") (Insert 'x'));
+  [%expect {| (ocamlx 6) |}];
+  (* Backspace from end. *)
+  show (apply (search_model "ocaml") Backspace);
+  [%expect {| (ocam 4) |}];
+  (* Delete_forward in the middle (cursor at 2 deletes 'a'). *)
+  show (apply (search_model ~cursor:2 "ocaml") Delete_forward);
+  [%expect {| (ocml 2) |}];
+  (* Kill_to_end from cursor 2. *)
+  show (apply (search_model ~cursor:2 "ocaml") Kill_to_end);
+  [%expect {| (oc 2) |}];
+  (* Kill_word_backward over "type sys" at end deletes the last word. *)
+  show (apply (search_model "type sys") Kill_word_backward);
+  [%expect {| ("type " 5) |}];
+  (* Motion: left/right move the edit cursor and clamp. *)
+  show (apply (search_model ~cursor:0 "ocaml") Move_left);
+  [%expect {| (ocaml 0) |}];
+  show (apply (search_model "ocaml") Move_right);
+  [%expect {| (ocaml 5) |}];
+  show (apply (search_model ~cursor:2 "ocaml") Move_to_start);
+  [%expect {| (ocaml 0) |}];
+  show (apply (search_model ~cursor:2 "ocaml") Move_to_end);
+  [%expect {| (ocaml 5) |}]
+;;
+
+(* The routing matrix: for each mode, a representative set of keys mapped to their action
+   (or none). This is the contract that today lives only in [Model.route]'s prose. *)
+let%expect_test "route maps keys to actions per mode" =
+  let route mode event = Model.route { Model.Model.initial with mode } event in
+  let show name mode event =
+    print_s [%sexp (name : string), (route mode event : Model.Action.t option)]
+  in
+  (* Browse. *)
+  show "browse /" Browse (key (ASCII '/'));
+  show "browse ?" Browse (key (ASCII '?'));
+  show "browse C-n" Browse (key ~mods:[ Ctrl ] (ASCII 'N'));
+  show "browse Tab" Browse (key Tab);
+  show "browse x (unbound)" Browse (key (ASCII 'x'));
+  [%expect
+    {|
+    ("browse /" (Start_search))
+    ("browse ?" (Open_help))
+    ("browse C-n" (Down))
+    ("browse Tab" (Toggle_focus))
+    ("browse x (unbound)" ())
+    |}];
+  (* Search captures text + emacs editing. *)
+  show "search a" Search (key (ASCII 'a'));
+  show "search Esc" Search (key Escape);
+  show "search Enter" Search (key Enter);
+  show "search C-w" Search (key ~mods:[ Ctrl ] (ASCII 'W'));
+  [%expect
+    {|
+    ("search a" ((Insert a)))
+    ("search Esc" (Exit_search))
+    ("search Enter" (Toggle_focus))
+    ("search C-w" (Kill_word_backward))
+    |}];
+  (* Help swallows everything except the dismiss keys. *)
+  show "help q" Help (key (ASCII 'q'));
+  show "help Esc" Help (key Escape);
+  show "help x" Help (key (ASCII 'x'));
+  [%expect
+    {|
+    ("help q" (Close_help))
+    ("help Esc" (Close_help))
+    ("help x" ())
+    |}];
+  (* Edit routes nothing through the reducer — the handler + chord own it. *)
+  show "edit C-n" Edit (key ~mods:[ Ctrl ] (ASCII 'N'));
+  show "edit a" Edit (key (ASCII 'a'));
+  [%expect {|
+    ("edit C-n" ())
+    ("edit a" ())
+    |}]
+;;
+
+let%expect_test "wrap_line wraps, hard-splits, and preserves blanks" =
+  let show line = print_s [%sexp (Render.wrap_line ~width:6 line : string list)] in
+  (* Greedy word wrap. *)
+  show "the quick brown fox";
+  [%expect {| (the quick brown fox) |}];
+  (* A word longer than the width is hard-split into width-sized chunks. *)
+  show "abcdefghij";
+  [%expect {| (abcdef ghij) |}];
+  (* A blank line stays one blank line. *)
+  show "";
+  [%expect {| ("") |}]
+;;
+
+(* [detail_max_scroll] must equal (wrapped body lines) - (rows under the header), floored
+   at 0 — the same geometry the renderer slices by, so a scroll offset can't run past the
+   body. *)
+let%expect_test "detail_max_scroll matches the wrapped-body geometry" =
+  let note : Db.Note.t =
+    { id = 1
+    ; slug = Some "s"
+    ; kind = "note"
+    ; title = Some "t"
+    ; body = "one two three four five six seven eight"
+    ; entry_date = Some "2026-06-07"
+    ; metadata = None
+    }
+  in
+  (* width 6 wraps the body; header for this note is title+#id/kind+slug+date+blank = 5. *)
+  let lines = List.length (Render.detail_body_lines ~width:6 note.body) in
+  print_s [%sexp "wrapped body lines", (lines : int)];
+  [%expect {| ("wrapped body lines" 8) |}];
+  (* height 9 → 9-5 = 4 body rows → max scroll 8-4 = 4. *)
+  print_s [%sexp (Render.detail_max_scroll ~width:6 ~height:9 (Some note) : int)];
+  [%expect {| 4 |}];
+  (* Tiny height → header eats everything → 0 body rows → max scroll = all lines. *)
+  print_s [%sexp (Render.detail_max_scroll ~width:6 ~height:1 (Some note) : int)];
+  [%expect {| 8 |}];
+  (* No note → 0. *)
+  print_s [%sexp (Render.detail_max_scroll ~width:6 ~height:9 None : int)];
+  [%expect {| 0 |}]
 ;;
