@@ -114,11 +114,19 @@ module Model = struct
     ; mode : Mode.t
     ; editor : Editor.t
     ; editing_id : int option
-    (* id of the note being edited in [Edit] mode; pins the save target so a corpus reload
-       can't change which note a save writes to. The [C-x C-s] chord's armed-bit lives in
-       a separate [Bonsai.state_machine] ([chord] in [app]), not here, so it stays
-       batch-safe.
-    *)
+        (* id of the note being edited in [Edit] mode; pins the save target so a corpus
+           reload can't change which note a save writes to. The [C-x C-s] chord's
+           armed-bit lives in a separate [Bonsai.state_machine] ([chord] in [app]), not
+           here, so it stays batch-safe.
+        *)
+    ; mark : int option
+        (* Emacs-style mark for the body editor: a codepoint offset into the editor buffer
+           set by [C-Space]. [None] = no mark. The region is
+           [min mark cursor, max mark cursor]. Only meaningful in [Edit] mode; cleared on
+           copy and on edit exit. *)
+    ; kill_ring : string option
+    (* One-slot kill ring: the text of the last copied region. Stands in for a system
+       clipboard (no platform dep, testable); [M-w] writes it. *)
     }
   [@@deriving sexp_of, equal]
 
@@ -129,6 +137,8 @@ module Model = struct
     ; mode = Browse
     ; editor = Editor.empty
     ; editing_id = None
+    ; mark = None
+    ; kill_ring = None
     }
   ;;
 end
@@ -650,7 +660,7 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
   let%tydi { text = editor_text
            ; send_actions = editor_send_actions
            ; view = editor_view
-           ; cursor = _
+           ; cursor = editor_cursor
            ; set_text = editor_set_text
            ; rope = _
            ; get_cursor_position = editor_get_cursor_position
@@ -684,7 +694,8 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
      the corpus and drop back to Browse. *)
   let to_browse =
     let%arr set_model in
-    set_model (fun (m : Model.t) -> { m with mode = Browse; editing_id = None })
+    set_model (fun (m : Model.t) ->
+      { m with mode = Browse; editing_id = None; mark = None })
   in
   let chord_input =
     let%arr model and editor_text and reload_notes and to_browse in
@@ -792,14 +803,16 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     in
     let detail_box =
       if editing
-      then
+      then (
         (* Editing takes over the detail pane: the editor's own view replaces the
            read-only body, the box is focused, and the title shows the save/cancel chord.
            Pinned to the pane geometry so the frame doesn't resize to the text. *)
-        box
-          ~focused:true
-          ~title:"Edit  C-x C-s save  C-g cancel"
-          (fit ~width:detail_w ~height:pane_h editor_view)
+        let title =
+          match model.mark with
+          | Some n -> [%string "Edit  mark@%{n#Int}  M-w copy  C-g clear"]
+          | None -> "Edit  C-x C-s save  C-g cancel"
+        in
+        box ~focused:true ~title (fit ~width:detail_w ~height:pane_h editor_view))
       else
         box
           ~focused:(not list_focused)
@@ -834,6 +847,9 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     and active
     and editor_handler
     and editor_set_text
+    and editor_send_actions
+    and editor_cursor
+    and editor_text
     and inject_chord in
     fun (event : Event.t) ->
       let discard eff = Effect.map eff ~f:(fun (_ : Captured_or_ignored.t) -> ()) in
@@ -854,9 +870,39 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
          | _ -> inject event)
       | Edit ->
         (match event with
-         | Key_press { key = ASCII 'G'; mods = [ Ctrl ] } -> inject_chord Cancel
+         (* [C-g] clears the mark if one is set (without leaving Edit); otherwise it
+            cancels the edit. So the same key both un-arms a region and backs out, in that
+            order. *)
+         | Key_press { key = ASCII 'G'; mods = [ Ctrl ] } ->
+           (match model.mark with
+            | Some _ -> set_model (fun (m : Model.t) -> { m with mark = None })
+            | None -> inject_chord Cancel)
          | Key_press { key = ASCII 'X'; mods = [ Ctrl ] } -> inject_chord Arm
          | Key_press { key = ASCII 'S'; mods = [ Ctrl ] } -> inject_chord Save
+         (* [C-Space] sets the mark at the editor's caret. Terminals deliver Ctrl+Space as
+            control code 0x00, which the input parser canonicalizes to [C-@] (they share
+            the code); some emit [ASCII ' '] instead, so accept both. *)
+         | Key_press { key = ASCII ('@' | ' '); mods = [ Ctrl ] } ->
+           set_model (fun (m : Model.t) -> { m with mark = Some editor_cursor.position })
+         (* [M-w] copies the region [mark, caret] into the kill ring and clears the mark
+            (Emacs semantics). No mark = no-op. [position] is a codepoint offset, so slice
+            the UTF-8 buffer with [Zed_utf8.sub] to stay multibyte-correct. *)
+         | Key_press { key = ASCII 'w'; mods = [ Meta ] } ->
+           (match model.mark with
+            | None -> Effect.return ()
+            | Some m ->
+              let lo = Int.min m editor_cursor.position in
+              let hi = Int.max m editor_cursor.position in
+              let region = Zed.Zed_utf8.sub editor_text lo (hi - lo) in
+              set_model (fun (model : Model.t) ->
+                { model with kill_ring = Some region; mark = None }))
+         (* [C-y] yanks our kill ring at the caret via the editor's [Insert]. Intercepted
+            before delegation so it inserts *our* ring, not the editor's internal one
+            (which its Emacs handler binds to [C-y] / [Yank]). Empty ring = no-op. *)
+         | Key_press { key = ASCII 'Y'; mods = [ Ctrl ] } ->
+           (match model.kill_ring with
+            | None | Some "" -> Effect.return ()
+            | Some text -> editor_send_actions [ Insert text ])
          (* Any other key disarms a half-typed chord and goes to the editor. Both run: the
             disarm is a no-op when not armed. *)
          | _ -> Effect.all_unit [ inject_chord Disarm; discard (editor_handler event) ])

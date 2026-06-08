@@ -814,3 +814,94 @@ let%expect_test "C-g cancels an edit without saving" =
     └────────────────────────────────────────────────────────────────────────────────┘
     |}]
 ;;
+
+(* Mark + copy-region (in-model kill ring): [C-Space] sets the mark at the caret — the
+   Edit title then shows [mark@N]. Moving the caret right with [C-f] extends the region;
+   [M-w] copies [mark, caret] into the kill ring and clears the mark (title reverts).
+   [C-y] yanks the ring at the caret, so the copied text appears a second time in the
+   body. This proves the slice contents end-to-end without exposing the model. *)
+let%expect_test "C-Space marks, M-w copies the region, C-y yanks it back" =
+  let handle = notes_handle ~initial_dimensions:{ width = 80; height = 12 } () in
+  Bonsai_term_test.send_event handle (key (ASCII 'e'));
+  Handle.recompute_view handle;
+  (* Caret at 0. Set the mark there; the title should read mark@0. C-Space arrives as C-@
+     (control code 0x00) on the terminals we target. *)
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII '@'));
+  Handle.recompute_view handle;
+  Handle.show handle;
+  [%expect
+    {|
+    (cursor (((position ((x 32) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 32) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 32) (y 1))) (kind Bar_blinking))))
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │╭ Notes ──────────────────────╮╭ Edit  mark@0  M-w copy  C-g clear ────────────╮│
+    ││> Hello, zet                 ││This is the first seeded note. It exists so t  ││
+    ││  OCaml type system          ││he TUI has something to render while the data  ││
+    ││  Morning pages              ││ layer is wired up.                            ││
+    ││  Quick capture              ││                                               ││
+    ││  2026-05-28                 ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    │╰─────────────────────────────╯╰───────────────────────────────────────────────╯│
+    └────────────────────────────────────────────────────────────────────────────────┘
+    |}];
+  (* Extend the region to [0,4] = "This" by moving the caret right four chars, then copy.
+     The mark clears, so the title reverts to the default save/cancel hint. *)
+  for _ = 1 to 4 do
+    Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'F'));
+    Handle.recompute_view handle
+  done;
+  Bonsai_term_test.send_event handle (key ~mods:[ Meta ] (ASCII 'w'));
+  Handle.recompute_view handle;
+  Handle.show handle;
+  [%expect
+    {|
+    (cursor (((position ((x 33) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 34) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 35) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 36) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 36) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 36) (y 1))) (kind Bar_blinking))))
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │╭ Notes ──────────────────────╮╭ Edit  C-x C-s save  C-g cancel ───────────────╮│
+    ││> Hello, zet                 ││This is the first seeded note. It exists so t  ││
+    ││  OCaml type system          ││he TUI has something to render while the data  ││
+    ││  Morning pages              ││ layer is wired up.                            ││
+    ││  Quick capture              ││                                               ││
+    ││  2026-05-28                 ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    │╰─────────────────────────────╯╰───────────────────────────────────────────────╯│
+    └────────────────────────────────────────────────────────────────────────────────┘
+    |}];
+  (* Yank at the caret (position 4): "This" is inserted, so the line opens "ThisThis...". *)
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'Y'));
+  Handle.recompute_view handle;
+  Handle.show handle;
+  [%expect
+    {|
+    (cursor (((position ((x 40) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 40) (y 1))) (kind Bar_blinking))))
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │╭ Notes ──────────────────────╮╭ Edit  C-x C-s save  C-g cancel ───────────────╮│
+    ││> Hello, zet                 ││ThisThis is the first seeded note. It exists   ││
+    ││  OCaml type system          ││so the TUI has something to render while the   ││
+    ││  Morning pages              ││data layer is wired up.                        ││
+    ││  Quick capture              ││                                               ││
+    ││  2026-05-28                 ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    │╰─────────────────────────────╯╰───────────────────────────────────────────────╯│
+    └────────────────────────────────────────────────────────────────────────────────┘
+    |}]
+;;
