@@ -4,10 +4,10 @@ A tui wrapper around my personal sqlite db that I use for technical notes and de
 
 This is filling a real need for me but also largely just exploring some technologies and techniques:
 
-[OxCaml](https://oxcaml.org) fork of OCaml, though so far I'm not using any of its interesting features.
-[`bonsai_term`](https://github.com/janestreet/bonsai_term) an Elm architecture/mvu type tui framework.
+- [OxCaml](https://oxcaml.org) fork of OCaml, though so far I'm not using any of its interesting features.
+- [`bonsai_term`](https://github.com/janestreet/bonsai_term) an Elm architecture/mvu type tui framework.
 
-Bonsai's approach to state and incremental UI updates lets you sequence events directly in tests and then assert against the text output by the view at that point.
+- Bonsai's approach to state and incremental UI updates lets you sequence events directly in tests and then assert against the text output by the view at that point.
 
 Combined with snapshot testing you get the most straightforward testing possible for a tui app. Basically just saving screenshots of your app.
 
