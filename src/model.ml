@@ -68,10 +68,6 @@ module Model = struct
 end
 
 module Action = struct
-  (* [Up]/[Down]/[Top]/[Bottom] are routed by pane focus: they move the list cursor when
-     the list is focused, and scroll the detail body when the detail pane is focused. The
-     [Search_*] / editing variants only fire while [mode = Search]; the emacs editing set
-     is lifted from strace_ui's filter_editor. *)
   type t =
     | Up
     | Down
@@ -79,10 +75,10 @@ module Action = struct
     | Bottom
     | Toggle_focus
     | Focus_detail
-    | Start_search (* [/] in Browse: enter Search, fresh empty query *)
-    | Exit_search (* Esc in Search: back to Browse, clear query *)
-    | Open_help (* [?] in Browse: show the keybinding overlay *)
-    | Close_help (* Esc/C-g/?/q in Help: back to Browse *)
+    | Start_search
+    | Exit_search
+    | Open_help
+    | Close_help
     | Insert of char
     | Backspace
     | Delete_forward
@@ -95,15 +91,8 @@ module Action = struct
   [@@deriving sexp_of]
 end
 
-(* Map a raw key to an action *given the current mode*. Routing lives here — not in the
-   Bonsai handler — so it reads the live model inside [set_model] rather than a handler
-   value that's only as fresh as the last view recompute. (A burst of keys between frames,
-   e.g. typing right after [/], would otherwise be routed by a stale mode.) Returns [None]
-   for keys with no binding in the current mode. *)
 let route (model : Model.t) (event : Event.t) : Action.t option =
   match model.mode with
-  (* Help overlay swallows the keyboard: any of Esc, C-g, ?, or q dismisses it; everything
-     else is inert so a stray key can't act on the list underneath. *)
   | Help ->
     (match event with
      | Key_press { key = Escape; mods = _ }
@@ -111,9 +100,8 @@ let route (model : Model.t) (event : Event.t) : Action.t option =
      | Key_press { key = ASCII '?'; mods = _ }
      | Key_press { key = ASCII 'q'; mods = [] } -> Some Close_help
      | _ -> None)
-  (* Search mode captures the keyboard for editing the query line. Esc leaves search;
-     Enter commits — it hands focus to the list so you can navigate results, query still
-     applied. The emacs editing set is lifted from strace_ui's filter_editor. *)
+  (* Emacs editing keybindings from strace_ui in
+     https://github.com/janestreet/bonsai_term_examples *)
   | Search ->
     (match event with
      | Key_press { key = Escape; mods = _ } -> Some Exit_search
@@ -150,15 +138,11 @@ let route (model : Model.t) (event : Event.t) : Action.t option =
      | Key_press { key = ASCII 'E'; mods = [ Ctrl ] } -> Some Bottom
      | Key_press { key = Enter; mods = [] } -> Some Focus_detail
      | _ -> None)
-  (* Edit mode is driven by the text editor's own handler plus the save/cancel chord. The
-     chord lives in a dedicated [Bonsai.state_machine] (see [chord] in [app]) so it reads
-     fresh state and can't be defeated by event batching; [route] has nothing for Edit. *)
   | Edit -> None
 ;;
 
-(* Emacs-style backward word boundary from [cursor] in [buf]: skip trailing spaces, then
-   skip the word, returning the offset where the word starts. Lifted from strace_ui's
-   filter_editor. *)
+(* Word-boundary logic from strace_ui in
+   https://github.com/janestreet/bonsai_term_examples *)
 let word_boundary_backward buf cursor =
   let is_space i = Char.equal buf.[i] ' ' in
   let i = ref cursor in
@@ -171,17 +155,10 @@ let word_boundary_backward buf cursor =
   !i
 ;;
 
-(* Any edit to the query buffer re-selects from the top of the (new) result set, so cursor
-   and detail scroll reset to 0. The list selection index and the edit-line cursor are
-   different things; only the latter changes here. *)
 let edit_query (model : Model.t) ~f : Model.t =
   { model with editor = f model.editor; cursor = 0; detail_scroll = 0 }
 ;;
 
-(* Pure reducer. [count] is the corpus size and [detail_max] the largest valid detail
-   scroll offset for the selected note; both are threaded in so motion can clamp without
-   the model carrying the notes or their wrapped geometry. Moving the list cursor resets
-   the detail scroll, since a new note's body starts at the top. *)
 let apply_action_pure ~count ~detail_max (model : Model.t) (action : Action.t) : Model.t =
   let last = Int.max 0 (count - 1) in
   let clamp_cursor i = Int.clamp_exn i ~min:0 ~max:last in
@@ -233,8 +210,6 @@ let apply_action_pure ~count ~detail_max (model : Model.t) (action : Action.t) :
   | Move_to_start -> { model with editor = { model.editor with cursor = 0 } }
   | Move_to_end ->
     { model with editor = { model.editor with cursor = String.length model.editor.buf } }
-  (* Navigation is routed by pane focus: in Detail the keys scroll the body, in List they
-     move the selection over the active list. *)
   | Up ->
     if Focus.equal model.focus Detail
     then { model with detail_scroll = clamp_scroll (model.detail_scroll - 1) }

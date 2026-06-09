@@ -11,13 +11,8 @@ let apply_action_pure = Model.apply_action_pure
 let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
   : view:View.t Bonsai.t * handler:(Event.t -> unit Effect.t) Bonsai.t
   =
-  (* Browse corpus, held as Bonsai state so an edit can refresh it without restarting. The
-     list value is its own immutable box: [reload_notes] re-pulls a *fresh* list, so the
-     phys_equal cutoff sees the change (see the virtual_list perf note in CLAUDE.md). The
-     live handle stays open so both search and reload can re-query; see [launch_tui]. *)
-  (* No [~equal]: the cutoff is [phys_equal] by design. A reloaded corpus is a freshly
-     allocated list, so identity differs and dependents recompute; an unchanged corpus
-     keeps the same value and is cut off. *)
+  (* No [~equal]: phys_equal by design. A reloaded corpus is a freshly allocated list so
+     dependents recompute; an unchanged corpus keeps the same pointer and is cut off. *)
   let notes, set_notes = Bonsai.state' (Db.list_all db) graph in
   let reload_notes =
     let%arr set_notes in
@@ -30,11 +25,8 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
       ~equal:[%equal: Model_state.t]
       graph
   in
-  (* Live FTS results, derived from the query buffer. The raw buffer is sanitized to a
-     safe MATCH (so half-typed input can't raise an FTS5 error), then [cutoff] on the
-     string keeps us from re-querying when the buffer changes in a way that doesn't change
-     the query text. An empty sanitized query yields no results (rather than a [""]
-     MATCH). *)
+  (* Cutoff on the sanitized string avoids re-querying when editing the buffer doesn't
+     change the actual MATCH expression (e.g. trailing space). *)
   let safe_query =
     Bonsai.cutoff
       ~equal:String.equal
@@ -47,16 +39,13 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     then []
     else Db.search db ~query:safe_query ~limit:200 ()
   in
-  (* The active list backs both selection and rendering: results in Search, corpus in
-     Browse. Cursor/scroll clamping is computed against whichever is active. *)
   let active =
     let%arr model and results and notes in
     match model.mode with
     | Search -> results
     | Browse | Help | Edit -> notes
   in
-  (* Border boxes cost 2 cols each (left+right); two boxes = 4. Split the rest
-     golden-ratio: list ~38%, detail ~62%. *)
+  (* Golden-ratio split: list ~38%, detail ~62%. Border boxes cost 4 cols total. *)
   let panes =
     let%arr { Dimensions.width; height } = dimensions in
     let content_width = width - 4 in
@@ -65,10 +54,6 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     let pane_h = Int.max 3 (height - 2) in
     list_w, detail_w, pane_h
   in
-  (* The text editor component. Instantiated unconditionally (Bonsai graph nodes are
-     static): it always exists, but is only rendered and fed keys in [Edit] mode. On entry
-     we seed it with the note body via [set_text]; on save we read [editor_text]. Sized to
-     the detail pane's interior. *)
   let editor_width =
     let%arr _, detail_w, _ = panes in
     Int.max 1 (detail_w - 2)
@@ -101,17 +86,10 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
       ~handler:editor_handler
       graph
   in
-  (* The [C-x C-s] save chord lives in its own state machine so its armed-bit is read and
-     updated inside [apply_action] — against the freshly-applied model — rather than from
-     a handler closure that's only as fresh as the last frame. That matters because the
-     bonsai_term run loop can deliver several keystrokes from one input read and dispatch
-     them all through a single frame's handler (see driver.ml): a [C-x] then [C-s]
-     arriving in the same batch would, in a closure that captured [pending = false], miss
-     the chord. Here each action sees the prior action's result, so batching is safe.
-
-     Input carries what the effects need: the id being edited (pins the save target), the
-     live editor text (the new body), and the two effects to run on completion — refresh
-     the corpus and drop back to Browse. *)
+  (* The C-x C-s chord lives in a state_machine so its armed-bit is updated inside
+     apply_action. The run loop can batch multiple keystrokes into one frame; a handler
+     closure would see a stale [pending=false] for both keys. The state machine sees each
+     action's result in sequence, so C-x then C-s in the same batch still fires the save. *)
   let to_browse =
     let%arr set_model in
     set_model (fun (m : Model_state.t) ->
@@ -158,11 +136,6 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
       chord_input
       graph
   in
-  (* A single inject takes the raw key and does mode/focus routing inside [set_model], so
-     it reads the live model rather than a handler value that's only as fresh as the last
-     view recompute. [count]/[detail_max] for nav clamping come from the *active* list and
-     live pane geometry; a one-frame-stale [active] only affects nav clamping (which
-     self-corrects next frame), never query editing. *)
   let inject =
     let%arr set_model
     and active
@@ -189,17 +162,11 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     let selected = List.nth active model.cursor in
     let list_focused = [%equal: Focus.t] model.focus List in
     let searching = [%equal: Mode.t] model.mode Search in
-    (* Terms to emphasize: the query words, lowercased, only while searching. Empty in
-       browse, so [highlight] is a no-op there. *)
     let terms =
       if searching
       then Fts_query.tokens model.editor.buf |> List.map ~f:String.lowercase
       else []
     in
-    (* The border box lays [title] into the top edge as-is (no truncation), so callers
-       must size it to the pane — [list_title ~budget] does that for the search query. The
-       [╭ ] prefix and trailing [ ─╮] consume ~4 cols; the [<tab>] hint (shown on the
-       unfocused pane) eats more, so its width is folded into the budget below. *)
     let box ~focused ~title content =
       let color = if focused then Render.accent else Render.dim in
       let tab = if focused then "" else " <tab>" in
@@ -226,9 +193,6 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     let detail_box =
       if editing
       then (
-        (* Editing takes over the detail pane: the editor's own view replaces the
-           read-only body, the box is focused, and the title shows the save/cancel chord.
-           Pinned to the pane geometry so the frame doesn't resize to the text. *)
         let title =
           match model.mark with
           | Some n -> [%string "Edit  mark@%{n#Int}  M-w copy  C-g clear"]
@@ -247,21 +211,13 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
              selected)
     in
     let content = View.hcat [ list_box; detail_box ] in
-    (* In Help mode the cheat-sheet sits on top of the panes, which stay visible behind
-       it. [zcat] draws earlier elements on top, so the overlay goes first. *)
     let overlay =
       match model.mode with
       | Help -> [ Render.render_help ~width ~height ]
       | Browse | Search | Edit -> []
     in
-    (* Backdrop so the framed panes sit on a full-screen rectangle. *)
     View.zcat (overlay @ [ content; View.rectangle ~width ~height () ])
   in
-  (* The handler routes by mode. Browse/Search/Help go through [inject] (the pure
-     reducer). Edit is split: the save/cancel chord goes to [inject_chord] (the batch-safe
-     state machine), and every other key is delegated to the text editor's own handler.
-     Opening the editor ([e]) seeds it with the note body and flips mode; that's a single
-     key, so routing it through [set_model] is fine. *)
   let handler =
     let%arr inject
     and set_model
@@ -277,8 +233,6 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
       let discard eff = Effect.map eff ~f:(fun (_ : Captured_or_ignored.t) -> ()) in
       match model.mode with
       | Browse | Search | Help ->
-        (* [e] on a selected note opens the editor seeded with its body. Everything else
-           in these modes is the reducer's job. *)
         (match event, model.mode with
          | Key_press { key = ASCII 'e'; mods = [] }, Browse ->
            (match List.nth active model.cursor with
@@ -292,24 +246,18 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
          | _ -> inject event)
       | Edit ->
         (match event with
-         (* [C-g] clears the mark if one is set (without leaving Edit); otherwise it
-            cancels the edit. So the same key both un-arms a region and backs out, in that
-            order. *)
          | Key_press { key = ASCII 'G'; mods = [ Ctrl ] } ->
            (match model.mark with
             | Some _ -> set_model (fun (m : Model_state.t) -> { m with mark = None })
             | None -> inject_chord Cancel)
          | Key_press { key = ASCII 'X'; mods = [ Ctrl ] } -> inject_chord Arm
          | Key_press { key = ASCII 'S'; mods = [ Ctrl ] } -> inject_chord Save
-         (* [C-Space] sets the mark at the editor's caret. Terminals deliver Ctrl+Space as
-            control code 0x00, which the input parser canonicalizes to [C-@] (they share
-            the code); some emit [ASCII ' '] instead, so accept both. *)
+         (* Terminals deliver C-Space as 0x00, canonicalized to C-@; some emit ASCII ' '. *)
          | Key_press { key = ASCII ('@' | ' '); mods = [ Ctrl ] } ->
            set_model (fun (m : Model_state.t) ->
              { m with mark = Some editor_cursor.position })
-         (* [M-w] copies the region [mark, caret] into the kill ring and clears the mark
-            (Emacs semantics). No mark = no-op. [position] is a codepoint offset, so slice
-            the UTF-8 buffer with [Zed_utf8.sub] to stay multibyte-correct. *)
+         (* [position] is a codepoint offset; use [Zed_utf8.sub] to slice
+            multibyte-correctly. *)
          | Key_press { key = ASCII 'w'; mods = [ Meta ] } ->
            (match model.mark with
             | None -> Effect.return ()
@@ -330,12 +278,9 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
             disarm is a no-op when not armed. *)
          | _ -> Effect.all_unit [ inject_chord Disarm; discard (editor_handler event) ])
   in
-  (* Track the terminal cursor to the editor's caret while editing; clear it otherwise so
-     the block cursor doesn't linger over the read-only panes. [get_cursor_position]
-     returns coordinates relative to the *whole* view it's given, so we pass the composed
-     app [view] (which embeds [editor_view]) — passing the bare editor view would yield
-     editor-local coords and place the cursor at the screen's top-left. Runs after each
-     frame so it sees the just-rendered view. *)
+  (* Pass the composed app [view], not the bare [editor_view]: [get_cursor_position]
+     returns coords relative to whatever view you give it, so passing editor_view would
+     yield editor-local coords and place the cursor at the screen's top-left. *)
   let () =
     let update_cursor =
       let%arr set_cursor = Effect.set_cursor graph

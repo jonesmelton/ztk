@@ -4,9 +4,6 @@ module Mode = Model.Mode
 module Editor = Model.Editor
 module Model = Model.Model
 
-(* Split [line] into maximal runs of "word" vs "non-word" characters, where a word char is
-   alphanumeric. Each run keeps its text; the boolean says whether it's a word. Used by
-   highlighting to test whole words against query-term prefixes without splitting words. *)
 let word_runs line =
   let is_word c = Char.is_alphanum c in
   String.to_list line
@@ -19,10 +16,6 @@ let word_runs line =
       | [] -> false ))
 ;;
 
-(* Render [line] as a [View.t], emphasizing words that match the search. A word matches
-   when its lowercased form starts with any of [terms] (already lowercased), mirroring the
-   FTS5 prefix-* semantics the search uses. Non-matching text keeps [base] attrs; matches
-   get a yellow bold overlay. With no terms this is just [View.text ~attrs:base line]. *)
 let highlight ~terms ~base line =
   match terms with
   | [] -> View.text ~attrs:base line
@@ -43,16 +36,10 @@ let highlight ~terms ~base line =
 let accent = Attr.Color.Expert.cyan
 let dim = Attr.Color.Expert.lightblack
 
-(* Pin a view to exactly [width] x [height] by backing it with a transparent rectangle of
-   that size, so a pane's box frame sizes to the pane — not to the longest line of
-   content. Content wider/taller than the box is cropped (callers wrap/slice to avoid
-   that). *)
 let fit ~width ~height view =
   View.zcat [ view; View.transparent_rectangle ~width ~height ]
 ;;
 
-(* Greedy word-wrap to [width] columns. Words longer than [width] are hard-split so a
-   single long token can't overflow the pane. A blank input line stays one blank line. *)
 let wrap_line ~width line =
   let width = Int.max 1 width in
   if String.length line <= width
@@ -71,8 +58,6 @@ let wrap_line ~width line =
       List.fold words ~init:([], "") ~f:(fun (rev_lines, cur) word ->
         if String.length word > width
         then (
-          (* emit the in-progress line, then the word's full-width chunks; the final chunk
-             becomes the new in-progress line. *)
           let chunks = hard_split word [] in
           let init = List.drop_last_exn chunks in
           let last = List.last_exn chunks in
@@ -86,16 +71,10 @@ let wrap_line ~width line =
     List.rev (flush rev_lines cur))
 ;;
 
-(* The detail body as a flat list of display lines: each source line word-wrapped to
-   [width], blank lines preserved. Shared by the renderer and the scroll-clamp so the max
-   scroll offset always matches what's actually drawn. *)
 let detail_body_lines ~width body =
   String.split_lines body |> List.concat_map ~f:(wrap_line ~width)
 ;;
 
-(* One row in the list pane: a selection marker + the note label, with search terms
-   emphasized. The label is truncated to the pane width first, so highlighting runs over
-   exactly what's drawn (and the marker stays plain). *)
 let render_list_row ~terms ~width ~is_selected (note : Db.Note.t) =
   let marker = if is_selected then "> " else "  " in
   let title = Db.Note.display_title note in
@@ -121,7 +100,6 @@ let render_list
       View.center (View.text ~attrs:[ Attr.fg dim ] empty_label) ~within:{ width; height }
     | _ ->
       let count = List.length notes in
-      (* Scroll offset: keep cursor in the middle of the viewport when possible. *)
       let scroll_off = Int.max 0 (cursor - (height / 2)) in
       let scroll_off = Int.min scroll_off (Int.max 0 (count - height)) in
       let visible =
@@ -133,12 +111,9 @@ let render_list
       in
       View.vcat rows
   in
-  (* Pin to the pane geometry so the box never resizes to the longest visible title. *)
   fit ~width ~height content
 ;;
 
-(* Number of body lines visible at once given the pane height and the fixed-height header.
-   [header_lines] is computed once and shared with the renderer. *)
 let detail_header_lines (note : Db.Note.t) =
   1 (* title *)
   + 1 (* "#id  kind" *)
@@ -147,9 +122,6 @@ let detail_header_lines (note : Db.Note.t) =
   + 1 (* blank separator *)
 ;;
 
-(* Largest valid [detail_scroll] for [note] at the given pane geometry: the wrapped body
-   line count minus the visible body rows, floored at 0. Shared with the reducer so a
-   scroll offset can never point past the end of the body. *)
 let detail_max_scroll ~width ~height (note : Db.Note.t option) =
   match note with
   | None -> 0
@@ -159,8 +131,6 @@ let detail_max_scroll ~width ~height (note : Db.Note.t option) =
     Int.max 0 (List.length body - body_rows)
 ;;
 
-(* Detail pane: fixed header (title/slug/kind/date) + scrollable, word-wrapped body. The
-   body is sliced by [scroll] (a wrapped-line offset) to the rows left under the header. *)
 let render_detail ?(terms = []) ~width ~height ~scroll (note : Db.Note.t option) =
   let content =
     match note with
@@ -199,12 +169,8 @@ let render_detail ?(terms = []) ~width ~height ~scroll (note : Db.Note.t option)
   fit ~width ~height content
 ;;
 
-(* The list pane title: in Browse it's just "Notes"; in Search it echoes the live query
-   with a cursor marker (▏) so you can see what you're typing and where the edit cursor
-   sits. [budget] is the column space the border box leaves for the title; the query
-   window scrolls horizontally to keep the cursor visible, so a long query stays usable
-   without the marker ever being split (the query buffer is pure ASCII, the marker is
-   multibyte). *)
+(* The ▏ marker is multibyte; budget arithmetic is byte-based, which is fine because the
+   query buffer is pure ASCII. The window slides so the marker is always visible. *)
 let list_title ~budget (model : Model.t) =
   match model.mode with
   | Mode.Browse | Help | Edit -> "Notes"
@@ -212,9 +178,7 @@ let list_title ~budget (model : Model.t) =
     let prefix = "Search: " in
     let { Editor.buf; cursor } = model.editor in
     let cursor = Int.clamp_exn cursor ~min:0 ~max:(String.length buf) in
-    (* Columns left for the query text after the label and the 1-col marker. *)
     let avail = Int.max 1 (budget - String.length prefix - 1) in
-    (* Slide a window over [buf] so [cursor] is always inside it. *)
     let start = Int.max 0 (cursor - avail) in
     let len = Int.min avail (String.length buf - start) in
     let window = String.sub buf ~pos:start ~len in
@@ -224,8 +188,6 @@ let list_title ~budget (model : Model.t) =
     [%string "%{prefix}%{before}▏%{after}"]
 ;;
 
-(* The keybinding cheat-sheet, as (keys, description) rows grouped under headings. Mirrors
-   docs/decisions.md "Keyboard conventions"; keep the two in sync when bindings change. *)
 let help_sections =
   [ ( "Navigation"
     , [ "C-n / C-p", "next / previous note"
@@ -252,9 +214,6 @@ let help_sections =
   ]
 ;;
 
-(* Render the help overlay: a bordered box listing every binding, centered over the panes.
-   The key column is padded to a fixed width so descriptions line up. Width/height are
-   computed from the content so the box hugs the text; [center] places it on the screen. *)
 let render_help ~width ~height =
   let key_col =
     List.concat_map help_sections ~f:(fun (_, rows) -> List.map rows ~f:fst)
@@ -274,7 +233,6 @@ let render_help ~width ~height =
       (View.text ~attrs:[ Attr.fg dim; Attr.bold ] heading :: List.map rows ~f:row)
       @ [ View.text "" ])
   in
-  (* Drop the trailing blank line so the box doesn't end with dead space. *)
   let blocks =
     match List.rev blocks with
     | _ :: rest -> List.rev rest

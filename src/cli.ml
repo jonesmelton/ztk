@@ -23,8 +23,6 @@ let db_path_flag =
   db_path
 ;;
 
-(* Print a note list the way the headless subcommands report results: one line per note,
-   tab-separated, so output is greppable and stable. *)
 let print_notes (notes : Db.Note.t list) =
   List.iter notes ~f:(fun n ->
     print_endline
@@ -37,10 +35,8 @@ let print_notes (notes : Db.Note.t list) =
          ]))
 ;;
 
-(* The DB handle stays open for the whole TUI run so the search path can re-query live.
-   [with_db]'s synchronous bracket won't do here: [app] reads the corpus and then the
-   Bonsai loop keeps querying until the user quits, so we must close only after the run's
-   deferred resolves, not when [Bonsai_term.start] returns its (still-pending) deferred. *)
+(* [with_db] closes synchronously; the Bonsai loop keeps querying until the user quits, so
+   we close only after the deferred from [Bonsai_term.start] resolves. *)
 let launch_tui db_path =
   let db = Db.open_ db_path in
   Async.Monitor.protect
@@ -50,9 +46,6 @@ let launch_tui db_path =
     (fun () -> Bonsai_term.start (App.app ~db))
 ;;
 
-(* Synchronous entry point for the no-subcommand group body, which runs outside the Async
-   scheduler and must return [unit]. Boots the scheduler, runs the TUI, and raises on
-   error. *)
 let launch_tui_blocking db_path =
   match Async.Thread_safe.block_on_async (fun () -> launch_tui db_path) with
   | Ok (Ok ()) -> ()
@@ -60,8 +53,6 @@ let launch_tui_blocking db_path =
   | Error exn -> raise exn
 ;;
 
-(* The interactive browser. Mirrors what bare `zet` does, but lets you pass -db. Bare
-   `zet` (no subcommand) runs this with the default path; see [command]. *)
 let tui_command =
   Async.Command.async_or_error
     ~summary:"launch the interactive TUI browser"
@@ -69,7 +60,6 @@ let tui_command =
      fun () -> launch_tui db_path)
 ;;
 
-(* Headless mirror of the list pane: [Db.list_all] or [Db.list_recent]. *)
 let list_command =
   Command.basic
     ~summary:"list notes (headless mirror of the TUI list pane)"
@@ -90,9 +80,6 @@ let list_command =
        print_notes notes)
 ;;
 
-(* Resolve an IDENT (as accepted by [show]/[edit]) to a note: a numeric string is tried as
-   an id first, then as a slug; a non-numeric string is a slug. Shared so every
-   IDENT-taking subcommand resolves the same way. *)
 let resolve_note db ident =
   match Int.of_string_opt ident with
   | Some id ->
@@ -102,8 +89,6 @@ let resolve_note db ident =
   | None -> Db.get_by_slug db ident
 ;;
 
-(* Headless mirror of opening a note in the detail pane: print its full body. IDENT is a
-   numeric id or a slug; numeric strings are tried as id first. *)
 let show_command =
   Command.basic
     ~summary:"print a single note's body (headless mirror of the TUI detail pane)"
@@ -129,9 +114,6 @@ let show_command =
          if not (String.is_suffix n.body ~suffix:"\n") then Out_channel.newline stdout)
 ;;
 
-(* Headless mirror of [Db.search] — full-text search printed to stdout. Every TUI
-   capability gets a subcommand like this so the CLI is a complete surface, scriptable
-   without the terminal UI. *)
 let search_command =
   Command.basic
     ~summary:"full-text search notes (headless mirror of the TUI search)"
@@ -150,10 +132,6 @@ let search_command =
        print_notes notes)
 ;;
 
-(* Headless mirror of editing a note's body in the TUI. IDENT resolves like [show]. The
-   new body comes from [-body] (inline), else [-file PATH], else stdin — so it scripts as
-   [echo ... | zet edit 5] or [zet edit my-slug -file note.md]. Naive overwrite, no
-   revision history (see [Db.update_body]). Exits nonzero if no note matches. *)
 let edit_command =
   Command.basic
     ~summary:"replace a note's body (headless mirror of the TUI editor)"
@@ -182,8 +160,6 @@ let edit_command =
          | Some n -> Db.update_body db ~id:n.id ~body:new_body))
 ;;
 
-(* Top-level: bare `zet` launches the TUI (default db); subcommands are the headless
-   mirrors. New features add a peer subcommand here. *)
 let command =
   Command.group
     ~summary:{|zet — zettelkasten TUI + headless CLI|}

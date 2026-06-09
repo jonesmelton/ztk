@@ -1,47 +1,63 @@
 # zet
 
-A terminal UI for searching, browsing, and editing metadata over a personal
-zettelkasten stored in SQLite. Built on
-[`bonsai_term`](https://github.com/janestreet/bonsai_term) (OxCaml).
+A tui wrapper around my personal sqlite db that I use for technical notes and developer journal.
 
-Status: early. Phase 0 (toolchain spike) done; data layer wired (SQLite via
-`sqlite3_utils`, reading seeded notes). See `docs/plan.md` for build order,
-`docs/decisions.md` for the why, `CLAUDE.md` for conventions.
+This is filling a real need for me but also largely just exploring some technologies and techniques:
+
+[OxCaml](https://oxcaml.org) fork of OCaml, though so far I'm not using any of its interesting features.
+[`bonsai_term`](https://github.com/janestreet/bonsai_term) an Elm architecture/mvu type tui framework.
+
+Bonsai's approach to state and incremental UI updates lets you sequence events directly in tests and then assert against the text output by the view at that point.
+
+Combined with snapshot testing you get the most straightforward testing possible for a tui app. Basically just saving screenshots of your app.
+
 
 ## Develop
 
-Requires the `5.2.0+ox` opam switch. Common tasks are wrapped in a `justfile`
-([`just`](https://github.com/casey/just) — `brew install just`); run `just`
-with no args to list them.
+Requires the `5.2.0+ox` opam switch. Common tasks are in a `justfile`
+([`just`](https://github.com/casey/just) — `brew install just`); `just` with no
+args lists them.
 
-```
-just build        # compile (dune build)
-just test         # run snapshot tests (silent on success)
-just test-force   # re-run even when nothing changed
-just promote      # accept new/changed snapshot output
-just fmt          # format in place
+| recipe | dune command |
+|---|---|
+| `just build` | `dune build` |
+| `just run` | `dune exec bin/main.exe` |
+| `just zet <args>` | `dune exec bin/main.exe -- <args>` |
+| `just test` | `dune runtest` |
+| `just test-force` | `dune runtest --force` |
+| `just promote` | `dune runtest --auto-promote` |
+| `just fmt` | `dune build @fmt --auto-promote` |
+
+## Testing
+
+Snapshot tests live in `test/test_zet.ml`. Each test sequences events against an
+in-memory SQLite database seeded from `db/schema.sql` + `db/seed.sql`, then
+asserts on the rendered ASCII frame. A representative snapshot:
+
+```ocaml
+let%expect_test "app renders two panes with list focused, first note selected" =
+  let handle = notes_handle () in
+  Handle.show handle;
+  [%expect
+    {|
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │╭ Notes ──────────────────────╮╭ Detail <tab> ─────────────────────────────────╮│
+    ││> Hello, zet                 ││Hello, zet                                     ││
+    ││  OCaml type system          ││#1  note                                       ││
+    ││  Morning pages              ││slug: hello-zet                                ││
+    ││  Quick capture              ││date: 2026-06-03                               ││
+    ││  2026-05-28                 ││                                               ││
+    ││                             ││This is the first seeded note. It exists so the││
+    ...
+    |}]
 ```
 
-Each recipe is a thin wrapper over the equivalent `dune` command, so plain
-`dune build` / `dune runtest [--force | --auto-promote]` still work if you'd
-rather not use `just`.
+Events are dispatched through the real handler — `send_event handle (key (ASCII '/'))` — the Bonsai graph stabilizes, and `Handle.show` renders the resulting `View.t` to ASCII. `dune runtest --auto-promote` accepts new or changed output.
 
 ## Run
 
-The TUI reads a zettelkasten SQLite file passed via `-db`. To build a fixture DB
-from the canonical schema + seed and launch against it:
+`just run` and bare `dune exec bin/main.exe` both use the default db path:
+`$ZET_DB` if set, else `~/.zet/zet.db`, else `zet.db` in the working directory.
+Pass `-db PATH` to override. `just zet <args>` runs a headless subcommand
+(e.g. `just zet search foo`).
 
-```
-sqlite3 db/zet.db < db/schema.sql   # create schema (one time)
-sqlite3 db/zet.db < db/seed.sql     # insert the seed note (one time)
-just run                            # launch TUI against db/zet.db (Ctrl-C to exit)
-just run db=path/to/other.db        # ...or point at a different db
-```
-
-`just run` defaults to `db/zet.db`; `just zet <args>` runs a headless
-subcommand (e.g. `just zet search foo`). The underlying command is
-`dune exec bin/main.exe -- -db db/zet.db`.
-
-`db/*.db` is gitignored — rebuild it from `db/schema.sql` + `db/seed.sql` any
-time. The `sqlite3` CLI on this machine is at
-`/opt/homebrew/opt/sqlite/bin/sqlite3`.

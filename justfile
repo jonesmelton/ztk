@@ -1,5 +1,3 @@
-db := "db/zet.db"
-
 # list recipes
 default:
     @just --list
@@ -8,13 +6,13 @@ default:
 build:
     dune build
 
-# run the TUI against a db (override: just run db=path/to.db)
-run db=db:
-    dune exec bin/main.exe
+# run the TUI; optionally override the db: just run db=path/to.db
+run db="":
+    dune exec bin/main.exe -- {{ if db != "" { "-db " + db } else { "" } }}
 
-# run a headless subcommand (e.g. just zet search foo)
-zet *args:
-    dune exec bin/main.exe -- {{args}}
+# run a headless subcommand (e.g. just zet search foo / just zet db=path/to.db search foo)
+zet db="" *args:
+    dune exec bin/main.exe -- {{ if db != "" { "-db " + db } else { "" } }} {{args}}
 
 # snapshot tests
 test:

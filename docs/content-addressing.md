@@ -1,6 +1,6 @@
 # Content-addressed revision history (design — not yet implemented)
 
-Companion to `plan.md` (build order) and `decisions.md` (rationale). This is an
+Companion to `plan.md` (build order). This is an
 **agreed design for an eventual schema change**, recorded so it doesn't have to be
 re-derived. It is *not* scheduled — current v1 work continues per `plan.md`.
 
