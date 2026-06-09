@@ -173,7 +173,7 @@ let render_detail ?(terms = []) ~width ~height ~scroll (note : Db.Note.t option)
    query buffer is pure ASCII. The window slides so the marker is always visible. *)
 let list_title ~budget (model : Model.t) =
   match model.mode with
-  | Mode.Browse | Help | Edit -> "Notes"
+  | Mode.Browse | Help | Edit | Extract -> "Notes"
   | Search ->
     let prefix = "Search: " in
     let { Editor.buf; cursor } = model.editor in
@@ -207,8 +207,12 @@ let help_sections =
       ] )
   ; ( "Editing"
     , [ "e", "edit selected note's body"
+      ; "C-Space", "set mark (start region)"
+      ; "M-w", "copy region"
+      ; "C-y", "yank (paste) copied text"
+      ; "C-x C-e", "extract region to a new note"
       ; "C-x C-s", "save changes"
-      ; "C-g", "cancel without saving"
+      ; "C-g", "clear mark, else cancel without saving"
       ] )
   ; "General", [ "?", "toggle this help"; "C-g / Esc / q", "close help" ]
   ]

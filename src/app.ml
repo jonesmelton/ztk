@@ -43,7 +43,7 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     let%arr model and results and notes in
     match model.mode with
     | Search -> results
-    | Browse | Help | Edit -> notes
+    | Browse | Help | Edit | Extract -> notes
   in
   (* Golden-ratio split: list ~38%, detail ~62%. Border boxes cost 4 cols total. *)
   let panes =
@@ -93,22 +93,54 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
   let to_browse =
     let%arr set_model in
     set_model (fun (m : Model_state.t) ->
-      { m with mode = Browse; editing_id = None; mark = None })
+      { m with mode = Browse; editing_id = None; mark = None; extract = None })
+  in
+  let module Chord_input = struct
+    type t =
+      { model : Model_state.t
+      ; editor_text : string
+      ; editor_position : int
+      ; reload_notes : unit Effect.t
+      ; to_browse : unit Effect.t
+      ; set_model : (Model_state.t -> Model_state.t) -> unit Effect.t
+      ; editor_set_text : string -> unit Effect.t
+      ; editor_send_actions :
+          Bonsai_term_text_editor.Action.t Nonempty_list.t -> unit Effect.t
+      }
+  end
   in
   let chord_input =
-    let%arr model and editor_text and reload_notes and to_browse in
-    model.editing_id, editor_text, reload_notes, to_browse
+    let%arr model
+    and editor_text
+    and editor_cursor
+    and reload_notes
+    and to_browse
+    and set_model
+    and editor_set_text
+    and editor_send_actions in
+    { Chord_input.model
+    ; editor_text
+    ; editor_position = editor_cursor.position
+    ; reload_notes
+    ; to_browse
+    ; set_model
+    ; editor_set_text
+    ; editor_send_actions
+    }
   in
   let module Chord = struct
     type t =
       | Arm (* [C-x]: arm the chord *)
       | Disarm (* any non-chord key: cancel a half-typed [C-x] without leaving Edit *)
-      | Save (* [C-s]: if armed, persist + leave Edit *)
-      | Cancel (* [C-g]: leave Edit without saving *)
+      | Save (* [C-s]: if armed, persist + leave the current mode *)
+      | Cancel (* [C-g]: leave Edit/Extract without saving *)
+      | Begin_extract
+        (* [C-e] (armed, in Edit, mark set): slice the region out of the body and enter
+           Extract mode to name the new note. *)
     [@@deriving sexp_of]
   end
   in
-  let _pending, inject_chord =
+  let _chord_armed, inject_chord =
     Bonsai.state_machine_with_input
       ~default_model:false
       ~sexp_of_model:[%sexp_of: bool]
@@ -116,7 +148,16 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
       ~apply_action:(fun ctx input armed (action : Chord.t) ->
         match input with
         | Bonsai.Computation_status.Inactive -> armed
-        | Active (editing_id, editor_text, reload_notes, to_browse) ->
+        | Active
+            { Chord_input.model
+            ; editor_text
+            ; editor_position
+            ; reload_notes
+            ; to_browse
+            ; set_model
+            ; editor_set_text
+            ; editor_send_actions
+            } ->
           (match action with
            | Arm -> true
            | Disarm -> false
@@ -124,14 +165,65 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
              Bonsai.Apply_action_context.schedule_event ctx to_browse;
              false
            | Save ->
-             (* Only an armed [C-s] saves; a bare [C-s] is inert. *)
-             (match armed, editing_id with
-              | true, Some id ->
+             (* Only an armed [C-s] saves; a bare [C-s] is inert. The save target depends
+                on the mode: Edit overwrites the body, Extract commits the atomic split. *)
+             (match armed, model.mode, model.extract, model.editing_id with
+              | true, Edit, _, Some id ->
                 Db.update_body db ~id ~body:editor_text;
                 Bonsai.Apply_action_context.schedule_event
                   ctx
                   (Effect.all_unit [ reload_notes; to_browse ])
+              | true, Extract, Some ex, _ ->
+                (* [editor_text] holds the new note's title; empty = untitled (NULL). *)
+                let title =
+                  match String.strip editor_text with
+                  | "" -> None
+                  | t -> Some t
+                in
+                let slug = Option.bind title ~f:Model.slug_of_title in
+                let (_ : int) =
+                  Db.extract_region
+                    db
+                    ~source_id:ex.source_id
+                    ~source_body:ex.source_body
+                    ~new_slug:slug
+                    ~new_kind:"note"
+                    ~new_title:title
+                    ~new_body:ex.new_body
+                    ~new_entry_date:None
+                    ~new_metadata:None
+                in
+                Bonsai.Apply_action_context.schedule_event
+                  ctx
+                  (Effect.all_unit [ reload_notes; to_browse ])
               | _ -> ());
+             false
+           | Begin_extract ->
+             (* [C-e] routes here unconditionally (gating on the Bonsai [armed] value
+                would be stale when [C-x][C-e] batch into one frame). Only an armed [C-e]
+                over a mark extracts; otherwise this is a plain editor end-of-line, which
+                we must still perform since the editor never saw the key. *)
+             (match armed, model.mode, model.mark, model.editing_id with
+              | true, Edit, Some mark, Some source_id ->
+                let lo = Int.min mark editor_position in
+                let hi = Int.max mark editor_position in
+                let new_body, source_body = Model.split_region ~buf:editor_text ~lo ~hi in
+                Bonsai.Apply_action_context.schedule_event
+                  ctx
+                  (Effect.all_unit
+                     [ editor_set_text ""
+                     ; set_model (fun (m : Model_state.t) ->
+                         { m with
+                           mode = Extract
+                         ; mark = None
+                         ; extract =
+                             Some { Model.Extract.source_id; source_body; new_body }
+                         })
+                     ])
+              | _ ->
+                Bonsai.Apply_action_context.schedule_event
+                  ctx
+                  (editor_send_actions [ Goto_eol ]));
              false))
       chord_input
       graph
@@ -158,7 +250,9 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     and editor_view
     and { Dimensions.width; height } = dimensions
     and list_w, detail_w, pane_h = panes in
-    let editing = [%equal: Mode.t] model.mode Edit in
+    let editing =
+      [%equal: Mode.t] model.mode Edit || [%equal: Mode.t] model.mode Extract
+    in
     let selected = List.nth active model.cursor in
     let list_focused = [%equal: Focus.t] model.focus List in
     let searching = [%equal: Mode.t] model.mode Search in
@@ -194,9 +288,12 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
       if editing
       then (
         let title =
-          match model.mark with
-          | Some n -> [%string "Edit  mark@%{n#Int}  M-w copy  C-g clear"]
-          | None -> "Edit  C-x C-s save  C-g cancel"
+          match model.mode with
+          | Extract -> "Extract  title?  C-x C-s save  C-g cancel"
+          | _ ->
+            (match model.mark with
+             | Some n -> [%string "Edit  mark@%{n#Int}  C-x C-e extract  M-w copy"]
+             | None -> "Edit  C-x C-s save  C-g cancel")
         in
         box ~focused:true ~title (Render.fit ~width:detail_w ~height:pane_h editor_view))
       else
@@ -214,7 +311,7 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     let overlay =
       match model.mode with
       | Help -> [ Render.render_help ~width ~height ]
-      | Browse | Search | Edit -> []
+      | Browse | Search | Edit | Extract -> []
     in
     View.zcat (overlay @ [ content; View.rectangle ~width ~height () ])
   in
@@ -252,6 +349,11 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
             | None -> inject_chord Cancel)
          | Key_press { key = ASCII 'X'; mods = [ Ctrl ] } -> inject_chord Arm
          | Key_press { key = ASCII 'S'; mods = [ Ctrl ] } -> inject_chord Save
+         (* [C-e] always routes to the chord machine, which decides in-sequence whether
+            the chord is armed: armed over a mark extracts; otherwise it replays
+            end-of-line on the editor. Gating here on the Bonsai [chord_armed] value would
+            be stale when [C-x][C-e] arrive in the same frame. *)
+         | Key_press { key = ASCII 'E'; mods = [ Ctrl ] } -> inject_chord Begin_extract
          (* Terminals deliver C-Space as 0x00, canonicalized to C-@; some emit ASCII ' '. *)
          | Key_press { key = ASCII ('@' | ' '); mods = [ Ctrl ] } ->
            set_model (fun (m : Model_state.t) ->
@@ -277,6 +379,14 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
          (* Any other key disarms a half-typed chord and goes to the editor. Both run: the
             disarm is a no-op when not armed. *)
          | _ -> Effect.all_unit [ inject_chord Disarm; discard (editor_handler event) ])
+      | Extract ->
+        (* The editor holds the new note's title. [C-x] [C-s] commits the atomic split;
+           [C-g] aborts back to Browse (the in-memory slice is discarded). *)
+        (match event with
+         | Key_press { key = ASCII 'G'; mods = [ Ctrl ] } -> inject_chord Cancel
+         | Key_press { key = ASCII 'X'; mods = [ Ctrl ] } -> inject_chord Arm
+         | Key_press { key = ASCII 'S'; mods = [ Ctrl ] } -> inject_chord Save
+         | _ -> Effect.all_unit [ inject_chord Disarm; discard (editor_handler event) ])
   in
   (* Pass the composed app [view], not the bare [editor_view]: [get_cursor_position]
      returns coords relative to whatever view you give it, so passing editor_view would
@@ -289,7 +399,7 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
       and editor_get_cursor_position in
       match model.mode with
       | Browse | Search | Help -> set_cursor None
-      | Edit ->
+      | Edit | Extract ->
         (match editor_get_cursor_position view with
          | None -> set_cursor None
          | Some ({ x; y } : Position.t) ->

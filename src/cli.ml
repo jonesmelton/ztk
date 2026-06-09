@@ -160,6 +160,73 @@ let edit_command =
          | Some n -> Db.update_body db ~id:n.id ~body:new_body))
 ;;
 
+let parse_line_range s =
+  match String.lsplit2 s ~on:'-' with
+  | Some (lo, hi) ->
+    (match Int.of_string_opt (String.strip lo), Int.of_string_opt (String.strip hi) with
+     | Some lo, Some hi -> Some (lo, hi)
+     | _ -> None)
+  | None ->
+    (* A bare "N" is the single-line range N-N. *)
+    Option.map (Int.of_string_opt (String.strip s)) ~f:(fun n -> n, n)
+;;
+
+let extract_command =
+  Command.basic
+    ~summary:"extract a line range into a new note (headless mirror of TUI C-x C-e)"
+    ~readme:(fun () ->
+      "IDENT is the source note's id (integer) or slug. -lines M-N selects the\n\
+       1-based inclusive line range to lift out (a bare N means just line N); use\n\
+       `zet show IDENT` to read off line numbers. The selected lines become a new\n\
+       note's body (outer blank lines trimmed); the source note keeps the rest with\n\
+       the gap closed. -title names the new note (its slug is derived from the\n\
+       title; omitted = untitled with no slug). The source trim and the new note are\n\
+       written in one transaction — neither lands without the other. Prints the new\n\
+       note's id. Exits nonzero if no note matches or the range is empty/invalid.")
+    (let%map_open.Command db_path = db_path_flag
+     and ident = anon ("IDENT" %: string)
+     and lines = flag "-lines" (required string) ~doc:"M-N 1-based inclusive line range"
+     and title = flag "-title" (optional string) ~doc:"STR title for the new note" in
+     fun () ->
+       match parse_line_range lines with
+       | None ->
+         prerr_endline (sprintf "invalid -lines %S (expected M-N or N)" lines);
+         exit 1
+       | Some (lo, hi) ->
+         Db.with_db db_path ~f:(fun db ->
+           match resolve_note db ident with
+           | None ->
+             prerr_endline (sprintf "no note matching %S" ident);
+             exit 1
+           | Some source ->
+             let new_body, source_body = Model.extract_lines ~body:source.body ~lo ~hi in
+             if String.is_empty new_body
+             then (
+               prerr_endline
+                 (sprintf "line range %d-%d is empty in note %d" lo hi source.id);
+               exit 1);
+             let title =
+               Option.bind title ~f:(fun t ->
+                 match String.strip t with
+                 | "" -> None
+                 | t -> Some t)
+             in
+             let slug = Option.bind title ~f:Model.slug_of_title in
+             let new_id =
+               Db.extract_region
+                 db
+                 ~source_id:source.id
+                 ~source_body
+                 ~new_slug:slug
+                 ~new_kind:"note"
+                 ~new_title:title
+                 ~new_body
+                 ~new_entry_date:None
+                 ~new_metadata:None
+             in
+             printf "%d\n" new_id))
+;;
+
 let command =
   Command.group
     ~summary:{|zet — zettelkasten TUI + headless CLI|}
@@ -173,5 +240,6 @@ let command =
     ; "show", show_command
     ; "search", search_command
     ; "edit", edit_command
+    ; "extract", extract_command
     ]
 ;;

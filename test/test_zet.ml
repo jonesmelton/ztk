@@ -96,6 +96,174 @@ let%expect_test "update_body persists and reindexes FTS" =
     |}]
 ;;
 
+let%expect_test "with_txn commits all statements on success" =
+  let db = seeded_db () in
+  Db.with_txn db ~f:(fun db ->
+    Db.update_body db ~id:1 ~body:"txn body one";
+    Db.update_body db ~id:2 ~body:"txn body two");
+  let body id = Option.bind (Db.get_by_id db id) ~f:(fun n -> Some n.body) in
+  print_s [%sexp ((body 1, body 2) : string option * string option)];
+  Db.close db;
+  [%expect {|
+    (("txn body one")
+     ("txn body two"))
+    |}]
+;;
+
+let%expect_test "with_txn rolls back every statement when f raises" =
+  let db = seeded_db () in
+  let body id = Option.bind (Db.get_by_id db id) ~f:(fun n -> Some n.body) in
+  let original_1 = body 1 in
+  (* First write succeeds, then we raise: the commit must never happen, so note 1's body
+     must revert to its pre-transaction value. *)
+  let raised =
+    Exn.does_raise (fun () ->
+      Db.with_txn db ~f:(fun db ->
+        Db.update_body db ~id:1 ~body:"should be rolled back";
+        failwith "boom"))
+  in
+  print_s [%sexp (raised : bool)];
+  print_s [%sexp ([%equal: string option] (body 1) original_1 : bool)];
+  Db.close db;
+  [%expect {|
+    true
+    true
+    |}]
+;;
+
+let%expect_test "create_note inserts and returns a searchable note" =
+  let db = seeded_db () in
+  let id =
+    Db.create_note
+      db
+      ~slug:(Some "extracted-kakapo")
+      ~kind:"note"
+      ~title:(Some "Kakapo facts")
+      ~body:"The kakapo is a flightless parrot."
+      ~entry_date:None
+      ~metadata:None
+  in
+  let created = Db.get_by_id db id in
+  print_s [%sexp (created : Db.Note.t option)];
+  print_endline "-- fts sees the new body --";
+  show_titles (Db.search db ~query:"kakapo" ~limit:10 ());
+  Db.close db;
+  [%expect
+    {|
+    ((
+      (id 6)
+      (slug (extracted-kakapo))
+      (kind note)
+      (title ("Kakapo facts"))
+      (body "The kakapo is a flightless parrot.")
+      (entry_date ())
+      (metadata   ())))
+    -- fts sees the new body --
+    6 extracted-kakapo note    Kakapo facts
+    |}]
+;;
+
+let%expect_test "create_note allows null slug and title" =
+  let db = seeded_db () in
+  let id =
+    Db.create_note
+      db
+      ~slug:None
+      ~kind:"journal"
+      ~title:None
+      ~body:"Untitled capture."
+      ~entry_date:(Some "2026-06-09")
+      ~metadata:None
+  in
+  print_s [%sexp (Db.get_by_id db id : Db.Note.t option)];
+  Db.close db;
+  [%expect
+    {|
+    ((
+      (id 6)
+      (slug ())
+      (kind journal)
+      (title ())
+      (body "Untitled capture.")
+      (entry_date (2026-06-09))
+      (metadata ())))
+    |}]
+;;
+
+let%expect_test "extract_region atomically creates the new note and trims the source" =
+  let db = seeded_db () in
+  (* Source note 1 body becomes the remainder; the extracted slice becomes a new note.
+     Both writes happen in one transaction. *)
+  let new_id =
+    Db.extract_region
+      db
+      ~source_id:1
+      ~source_body:"Hello, zet remainder."
+      ~new_slug:(Some "from-hello")
+      ~new_kind:"note"
+      ~new_title:(Some "Extracted bit")
+      ~new_body:"the extracted slice"
+      ~new_entry_date:None
+      ~new_metadata:None
+  in
+  print_endline "-- source trimmed --";
+  print_s [%sexp (Option.map (Db.get_by_id db 1) ~f:Db.Note.body : string option)];
+  print_endline "-- new note --";
+  print_s [%sexp (Db.get_by_id db new_id : Db.Note.t option)];
+  Db.close db;
+  [%expect
+    {|
+    -- source trimmed --
+    ("Hello, zet remainder.")
+    -- new note --
+    ((
+      (id 6)
+      (slug (from-hello))
+      (kind note)
+      (title ("Extracted bit"))
+      (body "the extracted slice")
+      (entry_date ())
+      (metadata   ())))
+    |}]
+;;
+
+let%expect_test "extract_region rolls back the source trim if the insert fails" =
+  let db = seeded_db () in
+  let original = Option.map (Db.get_by_id db 1) ~f:Db.Note.body in
+  (* A duplicate slug violates the UNIQUE constraint on the INSERT, which must abort the
+     whole transaction — leaving the source note's body untouched. *)
+  let raised =
+    Exn.does_raise (fun () ->
+      Db.extract_region
+        db
+        ~source_id:1
+        ~source_body:"trimmed body that must not persist"
+        ~new_slug:(Some "ocaml-notes") (* already taken by note 2 *)
+        ~new_kind:"note"
+        ~new_title:None
+        ~new_body:"orphan"
+        ~new_entry_date:None
+        ~new_metadata:None)
+  in
+  print_s [%sexp (raised : bool)];
+  print_endline "-- source unchanged --";
+  print_s
+    [%sexp
+      ([%equal: string option] (Option.map (Db.get_by_id db 1) ~f:Db.Note.body) original
+       : bool)];
+  print_endline "-- no orphan inserted --";
+  print_s [%sexp (List.length (Db.list_all db) : int)];
+  Db.close db;
+  [%expect
+    {|
+    true
+    -- source unchanged --
+    true
+    -- no orphan inserted --
+    5
+    |}]
+;;
+
 let%expect_test "resolve_note resolves by id then slug" =
   let db = seeded_db () in
   let title ident =
@@ -125,6 +293,66 @@ let%expect_test "edit composition: resolve by slug then overwrite body" =
   print_s [%sexp (Option.map (Db.get_by_id db 2) ~f:Db.Note.body : string option)];
   Db.close db;
   [%expect {| ("replaced via edit path") |}]
+;;
+
+let%expect_test "parse_line_range accepts M-N and bare N" =
+  let show s =
+    print_s [%sexp ((s, Zet.Cli.parse_line_range s) : string * (int * int) option)]
+  in
+  show "2-5";
+  show "7";
+  show " 3 - 9 ";
+  show "abc";
+  show "1-";
+  [%expect
+    {|
+    (2-5 ((2 5)))
+    (7 ((7 7)))
+    (" 3 - 9 " ((3 9)))
+    (abc ())
+    (1- ())
+    |}]
+;;
+
+let%expect_test "extract composition: resolve, lift a line range, persist atomically" =
+  let db = seeded_db () in
+  (* Give note 1 a multi-line body, then extract lines 2-3 into a new titled note. *)
+  Db.update_body db ~id:1 ~body:"keep one\npick two\npick three\nkeep four";
+  let lo, hi = Option.value_exn (Zet.Cli.parse_line_range "2-3") in
+  let source = Option.value_exn (Zet.Cli.resolve_note db "hello-zet") in
+  let new_body, source_body = Zet.Model.extract_lines ~body:source.body ~lo ~hi in
+  let title = Some "Picked Lines" in
+  let new_id =
+    Db.extract_region
+      db
+      ~source_id:source.id
+      ~source_body
+      ~new_slug:(Option.bind title ~f:Zet.Model.slug_of_title)
+      ~new_kind:"note"
+      ~new_title:title
+      ~new_body
+      ~new_entry_date:None
+      ~new_metadata:None
+  in
+  print_endline "-- source keeps the surviving lines, gap closed --";
+  print_s [%sexp (Option.map (Db.get_by_id db 1) ~f:Db.Note.body : string option)];
+  print_endline "-- new note holds the lifted lines, slug from title --";
+  print_s [%sexp (Db.get_by_id db new_id : Db.Note.t option)];
+  Db.close db;
+  [%expect
+    {|
+    -- source keeps the surviving lines, gap closed --
+    ("keep one\nkeep four")
+    -- new note holds the lifted lines, slug from title --
+    ((
+      (id 6)
+      (slug (picked-lines))
+      (kind note)
+      (title ("Picked Lines"))
+      (body "pick two\npick three")
+      (entry_date ())
+      (metadata   ())))
+    |}]
 ;;
 
 let%expect_test "search ranks matches and filters by kind" =
@@ -187,6 +415,13 @@ let%expect_test "print_notes emits the headless tab-separated format" =
 let notes_handle ?initial_dimensions () =
   let db = seeded_db () in
   Bonsai_term_test.create_handle ?initial_dimensions (Zet.App.app ~db)
+;;
+
+(* Like [notes_handle] but exposes the backing db so a test can assert on persisted state
+   after driving the UI. *)
+let notes_handle_with_db ?initial_dimensions () =
+  let db = seeded_db () in
+  db, Bonsai_term_test.create_handle ?initial_dimensions (Zet.App.app ~db)
 ;;
 
 let%expect_test "app renders two panes with list focused, first note selected" =
@@ -580,39 +815,39 @@ let%expect_test "? opens and closes the help overlay" =
     │╭ Notes ──────────────────────╮╭ Detail <tab> ─────────────────────────────────╮│
     ││> Hello, zet                 ││Hello, zet                                     ││
     ││  OCaml type system          ││#1  note                                       ││
-    ││  Morning pages              ││slug: hello-zet                                ││
-    ││  Quick capture              ││date: 2026-06-03                               ││
-    ││  2026-05-28    ╭ Keybindings ───────────────────────────────╮                ││
-    ││                │ Navigation                                 │It exists so the││
-    ││                │ C-n / C-p      next / previous note        │le the data     ││
-    ││                │ C-a / C-e      first / last note           │                ││
-    ││                │ Tab            switch list / detail pane   │                ││
-    ││                │ Enter          focus the detail pane       │                ││
-    ││                │                                            │                ││
-    ││                │ Detail pane                                │                ││
-    ││                │ C-n / C-p      scroll body down / up       │                ││
-    ││                │ C-a / C-e      top / bottom                │                ││
-    ││                │                                            │                ││
-    ││                │ Search                                     │                ││
-    ││                │ /              start full-text search      │                ││
-    ││                │ C-b / C-f      move cursor left / right    │                ││
-    ││                │ C-k            kill to end of line         │                ││
-    ││                │ C-w            kill word backward          │                ││
-    ││                │ C-d / DEL      delete char forward / back  │                ││
-    ││                │ Enter          commit query, focus results │                ││
-    ││                │ Esc            cancel search               │                ││
-    ││                │                                            │                ││
-    ││                │ Editing                                    │                ││
-    ││                │ e              edit selected note's body   │                ││
-    ││                │ C-x C-s        save changes                │                ││
-    ││                │ C-g            cancel without saving       │                ││
-    ││                │                                            │                ││
-    ││                │ General                                    │                ││
-    ││                │ ?              toggle this help            │                ││
-    ││                │ C-g / Esc / q  close help                  │                ││
-    ││                ╰────────────────────────────────────────────╯                ││
-    ││                             ││                                               ││
-    ││                             ││                                               ││
+    ││  Morning ╭ Keybindings ──────────────────────────────────────────╮           ││
+    ││  Quick ca│ Navigation                                            │           ││
+    ││  2026-05-│ C-n / C-p      next / previous note                   │           ││
+    ││          │ C-a / C-e      first / last note                      │ists so the││
+    ││          │ Tab            switch list / detail pane              │e data     ││
+    ││          │ Enter          focus the detail pane                  │           ││
+    ││          │                                                       │           ││
+    ││          │ Detail pane                                           │           ││
+    ││          │ C-n / C-p      scroll body down / up                  │           ││
+    ││          │ C-a / C-e      top / bottom                           │           ││
+    ││          │                                                       │           ││
+    ││          │ Search                                                │           ││
+    ││          │ /              start full-text search                 │           ││
+    ││          │ C-b / C-f      move cursor left / right               │           ││
+    ││          │ C-k            kill to end of line                    │           ││
+    ││          │ C-w            kill word backward                     │           ││
+    ││          │ C-d / DEL      delete char forward / back             │           ││
+    ││          │ Enter          commit query, focus results            │           ││
+    ││          │ Esc            cancel search                          │           ││
+    ││          │                                                       │           ││
+    ││          │ Editing                                               │           ││
+    ││          │ e              edit selected note's body              │           ││
+    ││          │ C-Space        set mark (start region)                │           ││
+    ││          │ M-w            copy region                            │           ││
+    ││          │ C-y            yank (paste) copied text               │           ││
+    ││          │ C-x C-e        extract region to a new note           │           ││
+    ││          │ C-x C-s        save changes                           │           ││
+    ││          │ C-g            clear mark, else cancel without saving │           ││
+    ││          │                                                       │           ││
+    ││          │ General                                               │           ││
+    ││          │ ?              toggle this help                       │           ││
+    ││          │ C-g / Esc / q  close help                             │           ││
+    ││          ╰───────────────────────────────────────────────────────╯           ││
     ││                             ││                                               ││
     ││                             ││                                               ││
     ││                             ││                                               ││
@@ -771,7 +1006,7 @@ let%expect_test "C-Space marks, M-w copies the region, C-y yanks it back" =
     (cursor (((position ((x 32) (y 1))) (kind Bar_blinking))))
     (cursor (((position ((x 32) (y 1))) (kind Bar_blinking))))
     ┌────────────────────────────────────────────────────────────────────────────────┐
-    │╭ Notes ──────────────────────╮╭ Edit  mark@0  M-w copy  C-g clear ────────────╮│
+    │╭ Notes ──────────────────────╮╭ Edit  mark@0  C-x C-e extract  M-w copy ──────╮│
     ││> Hello, zet                 ││This is the first seeded note. It exists so t  ││
     ││  OCaml type system          ││he TUI has something to render while the data  ││
     ││  Morning pages              ││ layer is wired up.                            ││
@@ -839,6 +1074,86 @@ let%expect_test "C-Space marks, M-w copies the region, C-y yanks it back" =
     |}]
 ;;
 
+let%expect_test "C-x C-e extracts a marked region into a new note, atomically" =
+  let db, handle =
+    notes_handle_with_db ~initial_dimensions:{ width = 80; height = 12 } ()
+  in
+  (* Open note 1 for editing, mark at offset 0, advance 4 chars so the region is "This". *)
+  Bonsai_term_test.send_event handle (key (ASCII 'e'));
+  Handle.recompute_view handle;
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII '@'));
+  Handle.recompute_view handle;
+  for _ = 1 to 4 do
+    Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'F'));
+    Handle.recompute_view handle
+  done;
+  (* C-x C-e: slice the region out and enter Extract mode (the editor now holds the title,
+     which starts empty). *)
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'X'));
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'E'));
+  Handle.recompute_view handle;
+  type_string_editor handle "Kakapo";
+  Handle.show handle;
+  [%expect
+    {|
+    (cursor (((position ((x 32) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 32) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 33) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 34) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 35) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 36) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 32) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 33) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 34) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 35) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 36) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 37) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 38) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 38) (y 1))) (kind Bar_blinking))))
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │╭ Notes ──────────────────────╮╭ Extract  title?  C-x C-s save  C-g cancel ────╮│
+    ││> Hello, zet                 ││Kakapo                                         ││
+    ││  OCaml type system          ││                                               ││
+    ││  Morning pages              ││                                               ││
+    ││  Quick capture              ││                                               ││
+    ││  2026-05-28                 ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    │╰─────────────────────────────╯╰───────────────────────────────────────────────╯│
+    └────────────────────────────────────────────────────────────────────────────────┘
+    |}];
+  (* C-x C-s commits: new note created + source trimmed, in one transaction. *)
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'X'));
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'S'));
+  Handle.recompute_view handle;
+  print_endline "-- source note 1 trimmed (leading \"This\" removed) --";
+  print_s [%sexp (Option.map (Db.get_by_id db 1) ~f:Db.Note.body : string option)];
+  print_endline "-- new note 6 created from the slice --";
+  print_s [%sexp (Db.get_by_id db 6 : Db.Note.t option)];
+  print_endline "-- new note is FTS-searchable by its slug-derived title --";
+  show_titles (Db.search db ~query:"kakapo" ~limit:10 ());
+  [%expect
+    {|
+    (cursor ())
+    -- source note 1 trimmed (leading "This" removed) --
+    (" is the first seeded note. It exists so the TUI has something to render while the data layer is wired up.")
+    -- new note 6 created from the slice --
+    ((
+      (id 6)
+      (slug (kakapo))
+      (kind note)
+      (title (Kakapo))
+      (body This)
+      (entry_date ())
+      (metadata   ())))
+    -- new note is FTS-searchable by its slug-derived title --
+    6 kakapo         note    Kakapo
+    |}]
+;;
+
 module Model = Zet.Model
 module Render = Zet.Render
 
@@ -853,6 +1168,81 @@ let search_model ?cursor buf =
 
 let apply ?(count = 5) ?(detail_max = 0) model action =
   Model.apply_action_pure ~count ~detail_max model action
+;;
+
+let%expect_test "slug_of_title kebab-cases and rejects empty" =
+  let show t = print_s [%sexp ((t, Model.slug_of_title t) : string * string option)] in
+  show "Kakapo Facts";
+  show "  Trailing & weird --- chars!! ";
+  show "already-kebab";
+  show "ünîcode Tïtle";
+  show "";
+  show "   ";
+  [%expect
+    {|
+    ("Kakapo Facts" (kakapo-facts))
+    ("  Trailing & weird --- chars!! " (trailing-weird-chars))
+    (already-kebab (already-kebab))
+    ("\195\188n\195\174code T\195\175tle" (unicode-title))
+    ("" ())
+    ("   " ())
+    |}]
+;;
+
+let%expect_test "split_region returns slice and remainder, codepoint-correct" =
+  let show ~lo ~hi buf =
+    print_s [%sexp (Model.split_region ~buf ~lo ~hi : string * string)]
+  in
+  show ~lo:0 ~hi:5 "Hello, world";
+  show ~lo:7 ~hi:12 "Hello, world";
+  (* multibyte: 'é' is one codepoint; slicing must not split the byte pair *)
+  show ~lo:1 ~hi:4 "aéíou";
+  [%expect
+    {|
+    (Hello ", world")
+    (world "Hello, ")
+    ("\195\169\195\173o" au)
+    |}]
+;;
+
+let%expect_test "extract_lines splits by 1-based inclusive line range" =
+  let body = "alpha\nbeta\ngamma\ndelta" in
+  let show ~lo ~hi =
+    print_s [%sexp (Model.extract_lines ~body ~lo ~hi : string * string)]
+  in
+  print_endline "-- middle range: gap closes cleanly --";
+  show ~lo:2 ~hi:3;
+  print_endline "-- single line --";
+  show ~lo:1 ~hi:1;
+  print_endline "-- whole body --";
+  show ~lo:1 ~hi:4;
+  print_endline "-- last line (remainder keeps no trailing newline) --";
+  show ~lo:4 ~hi:4;
+  [%expect
+    {|
+    -- middle range: gap closes cleanly --
+    ("beta\ngamma" "alpha\ndelta")
+    -- single line --
+    (alpha "beta\ngamma\ndelta")
+    -- whole body --
+    ("alpha\nbeta\ngamma\ndelta" "")
+    -- last line (remainder keeps no trailing newline) --
+    (delta "alpha\nbeta\ngamma")
+    |}]
+;;
+
+let%expect_test "extract_lines strips surrounding blank lines from the slice only" =
+  let body = "head\n\n  picked  \n\nstill picked\n\ntail" in
+  (* lines 2-6 include leading/trailing blanks around the kept content; the slice trims
+     outer blank lines but keeps interior ones and per-line indentation. *)
+  print_s [%sexp (Model.extract_lines ~body ~lo:2 ~hi:6 : string * string)];
+  [%expect {| ("  picked  \n\nstill picked" "head\ntail") |}]
+;;
+
+let%expect_test "extract_lines clamps an out-of-range hi to the last line" =
+  let body = "one\ntwo\nthree" in
+  print_s [%sexp (Model.extract_lines ~body ~lo:2 ~hi:99 : string * string)];
+  [%expect {| ("two\nthree" one) |}]
 ;;
 
 let%expect_test "list cursor clamps at both ends" =

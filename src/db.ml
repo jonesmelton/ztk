@@ -46,6 +46,21 @@ let exec_script (t : t) sql =
   | rc -> failwithf "exec_script failed: %s" (Sqlite3.Rc.to_string rc) ()
 ;;
 
+let with_txn (t : t) ~f =
+  exec_script t "begin";
+  match f t with
+  | result ->
+    exec_script t "commit";
+    result
+  | exception exn ->
+    (* Roll back on any failure so a partial multi-statement write never commits. The
+       rollback itself is best-effort: if it fails the original [exn] is still the
+       meaningful error, so swallow the rollback's. *)
+    (try exec_script t "rollback" with
+     | _ -> ());
+    raise exn
+;;
+
 let note_row =
   S.Ty.(
     ( p6 int (nullable text) text (nullable text) text (nullable text)
@@ -135,6 +150,55 @@ let update_body (t : t) ~id ~body : unit =
     ~ty:S.Ty.(p2 text int)
     body
     id
+;;
+
+let create_note (t : t) ~slug ~kind ~title ~body ~entry_date ~metadata : int =
+  S.exec_no_cursor_exn
+    t
+    {|insert into notes
+            ( slug
+            , kind
+            , title
+            , body
+            , entry_date
+            , metadata )
+       values (?, ?, ?, ?, ?, ?)|}
+    ~ty:
+      S.Ty.(p6 (nullable text) text (nullable text) text (nullable text) (nullable text))
+    slug
+    kind
+    title
+    body
+    entry_date
+    metadata;
+  Int64.to_int_exn (Sqlite3.last_insert_rowid t)
+;;
+
+let extract_region
+  (t : t)
+  ~source_id
+  ~source_body
+  ~new_slug
+  ~new_kind
+  ~new_title
+  ~new_body
+  ~new_entry_date
+  ~new_metadata
+  : int
+  =
+  with_txn t ~f:(fun t ->
+    let new_id =
+      create_note
+        t
+        ~slug:new_slug
+        ~kind:new_kind
+        ~title:new_title
+        ~body:new_body
+        ~entry_date:new_entry_date
+        ~metadata:new_metadata
+    in
+    update_body t ~id:source_id ~body:source_body;
+    new_id)
 ;;
 
 let search (t : t) ~query ?kind ~limit () : Note.t list =

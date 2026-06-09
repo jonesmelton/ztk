@@ -14,6 +14,23 @@ module Mode = struct
     | Search
     | Help (* full-screen keybinding cheat-sheet overlay; dismiss back to Browse *)
     | Edit (* editing the selected note's body; the text editor captures the keyboard *)
+    | Extract
+      (* naming the note extracted from a marked region; the editor holds the new title,
+         the slice + source remainder are pinned in [Model.extract] *)
+  [@@deriving sexp_of, equal]
+end
+
+(* The in-flight extraction: a marked region has been sliced out of the source note's body
+   but nothing is persisted yet. [new_body] is the slice (the new note's body),
+   [source_body] is what the source note keeps (its buffer with the slice removed), and
+   [source_id] pins the save target. The new title is entered live in the shared editor,
+   so it is not stored here. Committed atomically by [Db.extract_region]. *)
+module Extract = struct
+  type t =
+    { source_id : int
+    ; source_body : string
+    ; new_body : string
+    }
   [@@deriving sexp_of, equal]
 end
 
@@ -49,8 +66,11 @@ module Model = struct
            [min mark cursor, max mark cursor]. Only meaningful in [Edit] mode; cleared on
            copy and on edit exit. *)
     ; kill_ring : string option
-    (* One-slot kill ring: the text of the last copied region. Stands in for a system
-       clipboard (no platform dep, testable); [M-w] writes it. *)
+        (* One-slot kill ring: the text of the last copied region. Stands in for a system
+           clipboard (no platform dep, testable); [M-w] writes it. *)
+    ; extract : Extract.t option
+    (* [Some] only in [Extract] mode: the pending region-extraction awaiting a title and
+       save. [None] otherwise. *)
     }
   [@@deriving sexp_of, equal]
 
@@ -63,6 +83,7 @@ module Model = struct
     ; editing_id = None
     ; mark = None
     ; kill_ring = None
+    ; extract = None
     }
   ;;
 end
@@ -138,7 +159,89 @@ let route (model : Model.t) (event : Event.t) : Action.t option =
      | Key_press { key = ASCII 'E'; mods = [ Ctrl ] } -> Some Bottom
      | Key_press { key = Enter; mods = [] } -> Some Focus_detail
      | _ -> None)
-  | Edit -> None
+  | Edit | Extract -> None
+;;
+
+(* Kebab-case a title into a slug: lowercase, ASCII-fold common Latin-1 letters, keep
+   [a-z0-9], collapse every other run into a single dash, trim leading/trailing dashes.
+   [None] when nothing survives (empty/blank/punctuation-only) so the caller stores NULL. *)
+let slug_of_title title : string option =
+  (* Fold a Unicode codepoint to an ASCII slug char, or [None] to treat it as a separator.
+     Iterates codepoints (not bytes): an accented letter like 'ü' is one codepoint,
+     whereas its UTF-8 encoding is two bytes — folding per-byte would mangle it into
+     separators. *)
+  let fold_code code : char option =
+    if code <= 0x7f
+    then (
+      match Char.lowercase (Char.of_int_exn code) with
+      | ('a' .. 'z' | '0' .. '9') as c -> Some c
+      | _ -> None)
+    else (
+      match code with
+      | 0xe0 | 0xe1 | 0xe2 | 0xe3 | 0xe4 | 0xe5 | 0xc0 | 0xc1 | 0xc2 | 0xc3 | 0xc4 | 0xc5
+        -> Some 'a'
+      | 0xe8 | 0xe9 | 0xea | 0xeb | 0xc8 | 0xc9 | 0xca | 0xcb -> Some 'e'
+      | 0xec | 0xed | 0xee | 0xef | 0xcc | 0xcd | 0xce | 0xcf -> Some 'i'
+      | 0xf2 | 0xf3 | 0xf4 | 0xf5 | 0xf6 | 0xd2 | 0xd3 | 0xd4 | 0xd5 | 0xd6 -> Some 'o'
+      | 0xf9 | 0xfa | 0xfb | 0xfc | 0xd9 | 0xda | 0xdb | 0xdc -> Some 'u'
+      | 0xf1 | 0xd1 -> Some 'n'
+      | _ -> None)
+  in
+  let buf = Buffer.create (String.length title) in
+  Zed.Zed_utf8.iter
+    (fun zc ->
+      match fold_code (Zed.Zed_char.code zc) with
+      | Some c -> Buffer.add_char buf c
+      | None ->
+        (* Emit at most one separator dash per run; never lead with one. *)
+        (match Buffer.length buf with
+         | 0 -> ()
+         | n ->
+           if not (Char.equal (Buffer.nth buf (n - 1)) '-') then Buffer.add_char buf '-'))
+    title;
+  let s = Buffer.contents buf |> String.rstrip ~drop:(Char.equal '-') in
+  if String.is_empty s then None else Some s
+;;
+
+(* Split [buf] at the codepoint range [lo, hi): the slice is [buf[lo, hi)], the remainder
+   is the buffer with that slice removed. Codepoint offsets (not bytes) so multibyte text
+   slices cleanly — matches the editor's cursor [position] semantics. *)
+let split_region ~buf ~lo ~hi : string * string =
+  let lo, hi = Int.min lo hi, Int.max lo hi in
+  let slice = Zed.Zed_utf8.sub buf lo (hi - lo) in
+  let before = Zed.Zed_utf8.sub buf 0 lo in
+  let after = Zed.Zed_utf8.sub buf hi (Zed.Zed_utf8.length buf - hi) in
+  slice, before ^ after
+;;
+
+(* Extract a 1-based inclusive line range [lo, hi] from [body], returning
+   [(slice, remainder)]. The slice is the selected lines joined by newlines with leading
+   and trailing *blank* lines trimmed (interior blanks and per-line indentation kept). The
+   remainder is the lines outside the range rejoined, so the gap closes cleanly. [lo]/[hi]
+   are clamped to the body's line count; an empty/blank selection yields an empty slice.
+   Line-granular (used by the headless CLI), unlike the codepoint-granular [split_region]
+   the TUI uses. *)
+let extract_lines ~body ~lo ~hi : string * string =
+  let lines = String.split_lines body in
+  let n = List.length lines in
+  let lo = Int.clamp_exn lo ~min:1 ~max:(Int.max 1 n) in
+  let hi = Int.clamp_exn hi ~min:1 ~max:(Int.max 1 n) in
+  let lo, hi = Int.min lo hi, Int.max lo hi in
+  let picked, kept =
+    List.partitioni_tf lines ~f:(fun i _ ->
+      let one_based = i + 1 in
+      one_based >= lo && one_based <= hi)
+  in
+  let is_blank s = String.is_empty (String.strip s) in
+  let slice =
+    picked
+    |> List.drop_while ~f:is_blank
+    |> List.rev
+    |> List.drop_while ~f:is_blank
+    |> List.rev
+    |> String.concat ~sep:"\n"
+  in
+  slice, String.concat kept ~sep:"\n"
 ;;
 
 (* Word-boundary logic from strace_ui in

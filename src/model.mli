@@ -14,6 +14,21 @@ module Mode : sig
     | Search
     | Help
     | Edit
+    | Extract (* naming the note extracted from a marked region; editor holds the title *)
+  [@@deriving sexp_of, equal]
+end
+
+(** An in-flight region extraction: the marked slice has been removed from the source
+    note's body in memory but nothing is persisted yet. [new_body] is the slice (becomes
+    the new note's body); [source_body] is the source note's buffer with the slice
+    removed; [source_id] pins the save target. The title is entered live in the shared
+    editor. Committed atomically via [Db.extract_region]. *)
+module Extract : sig
+  type t =
+    { source_id : int
+    ; source_body : string
+    ; new_body : string
+    }
   [@@deriving sexp_of, equal]
 end
 
@@ -38,6 +53,7 @@ module Model : sig
     ; editing_id : int option
     ; mark : int option
     ; kill_ring : string option
+    ; extract : Extract.t option
     }
   [@@deriving sexp_of, equal]
 
@@ -67,6 +83,25 @@ module Action : sig
     | Kill_word_backward
   [@@deriving sexp_of]
 end
+
+(** Derive a slug from a title: lowercased, accented Latin-1 letters folded to ASCII, runs
+    of everything outside [a-z0-9] collapsed to single dashes, ends trimmed. [None] when
+    nothing survives (blank or punctuation-only), so the caller stores a NULL slug. *)
+val slug_of_title : string -> string option
+
+(** [split_region ~buf ~lo ~hi] returns [(slice, remainder)] where [slice] is the
+    codepoint range [\[lo, hi)] of [buf] and [remainder] is [buf] with that slice removed.
+    Offsets are codepoints (matching editor cursor positions), so multibyte text slices
+    cleanly. [lo]/[hi] are sorted, so order doesn't matter. *)
+val split_region : buf:string -> lo:int -> hi:int -> string * string
+
+(** [extract_lines ~body ~lo ~hi] lifts the 1-based inclusive line range [[lo, hi]] out of
+    [body], returning [(slice, remainder)]. The slice is the selected lines with outer
+    blank lines trimmed (interior blanks and indentation preserved); the remainder is the
+    surviving lines rejoined so the gap closes. [lo]/[hi] are clamped to the line count
+    and sorted. Line-granular for the headless CLI, unlike the codepoint-granular
+    [split_region]. *)
+val extract_lines : body:string -> lo:int -> hi:int -> string * string
 
 (** Map a raw key to an action given the current mode. [None] for keys with no binding in
     the current mode. Pure: reads only the model and the event. *)
