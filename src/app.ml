@@ -86,6 +86,25 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
       ~handler:editor_handler
       graph
   in
+  (* Discovery search for Extract mode: the typed title lives in the text-editor component
+     ([editor_text]), not [model.editor.buf], so it needs its own query. Same FTS index as
+     [search] (title + body), so a related note surfaces even when its title differs from
+     what you are typing. Purely informational — it never drives the append/create fork,
+     which keys off the exact slug match in the Save handler. *)
+  let extract_query =
+    Bonsai.cutoff
+      ~equal:String.equal
+      (let%arr editor_text and model in
+       match model.mode with
+       | Extract -> Fts_query.sanitize editor_text
+       | Browse | Search | Help | Edit -> "")
+  in
+  let extract_results =
+    let%arr extract_query in
+    if String.is_empty extract_query
+    then []
+    else Db.search db ~query:extract_query ~limit:200 ()
+  in
   (* The C-x C-s chord lives in a state_machine so its armed-bit is updated inside
      apply_action. The run loop can batch multiple keystrokes into one frame; a handler
      closure would see a stale [pending=false] for both keys. The state machine sees each
@@ -95,6 +114,28 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     set_model (fun (m : Model_state.t) ->
       { m with mode = Browse; editing_id = None; mark = None; extract = None })
   in
+  (* Return to Browse with the given note id selected and the detail pane focused. Used by
+     the append-to-existing extract path to land on the note we just appended to. The
+     cursor is an index into the active corpus, so we look the id up in a fresh [list_all]
+     (the same ordering Browse uses); if it is missing the cursor falls back to 0. *)
+  let open_note =
+    let%arr set_model in
+    fun id ->
+      set_model (fun (m : Model_state.t) ->
+        let cursor =
+          List.findi (Db.list_all db) ~f:(fun _ (n : Db.Note.t) -> n.id = id)
+          |> Option.value_map ~default:0 ~f:fst
+        in
+        { m with
+          mode = Browse
+        ; focus = Detail
+        ; cursor
+        ; detail_scroll = 0
+        ; editing_id = None
+        ; mark = None
+        ; extract = None
+        })
+  in
   let module Chord_input = struct
     type t =
       { model : Model_state.t
@@ -102,6 +143,7 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
       ; editor_position : int
       ; reload_notes : unit Effect.t
       ; to_browse : unit Effect.t
+      ; open_note : int -> unit Effect.t
       ; set_model : (Model_state.t -> Model_state.t) -> unit Effect.t
       ; editor_set_text : string -> unit Effect.t
       ; editor_send_actions :
@@ -115,6 +157,7 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     and editor_cursor
     and reload_notes
     and to_browse
+    and open_note
     and set_model
     and editor_set_text
     and editor_send_actions in
@@ -123,6 +166,7 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     ; editor_position = editor_cursor.position
     ; reload_notes
     ; to_browse
+    ; open_note
     ; set_model
     ; editor_set_text
     ; editor_send_actions
@@ -154,6 +198,7 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
             ; editor_position
             ; reload_notes
             ; to_browse
+            ; open_note
             ; set_model
             ; editor_set_text
             ; editor_send_actions
@@ -174,28 +219,46 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
                   ctx
                   (Effect.all_unit [ reload_notes; to_browse ])
               | true, Extract, Some ex, _ ->
-                (* [editor_text] holds the new note's title; empty = untitled (NULL). *)
+                (* [editor_text] holds the typed title. If its slug matches an existing
+                   note we append the slice to that note and open it; otherwise we create
+                   a new note. The slug carries the append/create decision because slug is
+                   UNIQUE in the schema, so the lookup returns at most one target — no
+                   ambiguity, and a slug that would have collided on create now appends
+                   instead of raising. Empty title = untitled (NULL), which has no slug
+                   and so always creates. *)
                 let title =
                   match String.strip editor_text with
                   | "" -> None
                   | t -> Some t
                 in
                 let slug = Option.bind title ~f:Model.slug_of_title in
-                let (_ : int) =
-                  Db.extract_region
-                    db
-                    ~source_id:ex.source_id
-                    ~source_body:ex.source_body
-                    ~new_slug:slug
-                    ~new_kind:"note"
-                    ~new_title:title
-                    ~new_body:ex.new_body
-                    ~new_entry_date:None
-                    ~new_metadata:None
+                let target = Option.bind slug ~f:(fun slug -> Db.get_by_slug db slug) in
+                let after =
+                  match target with
+                  | Some (existing : Db.Note.t) ->
+                    Db.append_region
+                      db
+                      ~source_id:ex.source_id
+                      ~source_body:ex.source_body
+                      ~target_id:existing.id
+                      ~slice:ex.new_body;
+                    Effect.all_unit [ reload_notes; open_note existing.id ]
+                  | None ->
+                    let (_ : int) =
+                      Db.extract_region
+                        db
+                        ~source_id:ex.source_id
+                        ~source_body:ex.source_body
+                        ~new_slug:slug
+                        ~new_kind:"note"
+                        ~new_title:title
+                        ~new_body:ex.new_body
+                        ~new_entry_date:None
+                        ~new_metadata:None
+                    in
+                    Effect.all_unit [ reload_notes; to_browse ]
                 in
-                Bonsai.Apply_action_context.schedule_event
-                  ctx
-                  (Effect.all_unit [ reload_notes; to_browse ])
+                Bonsai.Apply_action_context.schedule_event ctx after
               | _ -> ());
              false
            | Begin_extract ->
@@ -247,12 +310,15 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
   let view =
     let%arr model
     and active
+    and extract_results
     and editor_view
     and { Dimensions.width; height } = dimensions
     and list_w, detail_w, pane_h = panes in
-    let editing =
-      [%equal: Mode.t] model.mode Edit || [%equal: Mode.t] model.mode Extract
-    in
+    let extracting = [%equal: Mode.t] model.mode Extract in
+    let editing = [%equal: Mode.t] model.mode Edit || extracting in
+    (* In Extract mode the list pane shows discovery matches for the typed title, not the
+       browse corpus; there is no cursor over them, so nothing is highlighted. *)
+    let list_items = if extracting then extract_results else active in
     let selected = List.nth active model.cursor in
     let list_focused = [%equal: Focus.t] model.focus List in
     let searching = [%equal: Mode.t] model.mode Search in
@@ -261,9 +327,11 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
       then Fts_query.tokens model.editor.buf |> List.map ~f:String.lowercase
       else []
     in
-    let box ~focused ~title content =
+    (* [show_tab] appends the " <tab>" focus-cycle hint. Suppressed in Extract mode, where
+       Tab does not cycle panes (the editor owns the keyboard). *)
+    let box ?(show_tab = true) ~focused ~title content =
       let color = if focused then Render.accent else Render.dim in
-      let tab = if focused then "" else " <tab>" in
+      let tab = if focused || not show_tab then "" else " <tab>" in
       Bonsai_term_border_box.view
         ~line_type:Round_corners
         ~attrs:[ Attr.fg color ]
@@ -271,25 +339,41 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
         ~title_attrs:[ Attr.fg color; Attr.bold ]
         content
     in
-    let tab_cols = if list_focused then 0 else String.length " <tab>" in
+    let tab_cols = if list_focused || extracting then 0 else String.length " <tab>" in
     let list_box =
+      let empty_label =
+        if extracting
+        then "(no related notes)"
+        else if searching
+        then "(no matches)"
+        else "(no notes)"
+      in
+      (* No selection in the discovery list, so pass an out-of-range cursor to highlight
+         nothing. *)
+      let list_cursor = if extracting then -1 else model.cursor in
+      let list_title =
+        if extracting
+        then "Related"
+        else Render.list_title ~budget:(list_w - 4 - tab_cols) model
+      in
       box
-        ~focused:list_focused
-        ~title:(Render.list_title ~budget:(list_w - 4 - tab_cols) model)
+        ~show_tab:(not extracting)
+        ~focused:(list_focused && not extracting)
+        ~title:list_title
         (Render.render_list
-           ~empty_label:(if searching then "(no matches)" else "(no notes)")
+           ~empty_label
            ~terms
            ~width:list_w
            ~height:pane_h
-           ~cursor:model.cursor
-           active)
+           ~cursor:list_cursor
+           list_items)
     in
     let detail_box =
       if editing
       then (
         let title =
           match model.mode with
-          | Extract -> "Extract  title?  C-x C-s save  C-g cancel"
+          | Extract -> "Extract  C-x C-s save  C-g cancel"
           | _ ->
             (match model.mark with
              | Some n -> [%string "Edit  mark@%{n#Int}  C-x C-e extract  M-w copy"]

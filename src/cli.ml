@@ -183,9 +183,11 @@ let extract_command =
        `zet show IDENT` to read off line numbers. The selected lines become a new\n\
        note's body (outer blank lines trimmed); the source note keeps the rest with\n\
        the gap closed. -title names the new note (its slug is derived from the\n\
-       title; omitted = untitled with no slug). The source trim and the new note are\n\
-       written in one transaction — neither lands without the other. Prints the new\n\
-       note's id. Exits nonzero if no note matches or the range is empty/invalid.")
+       title; omitted = untitled with no slug). If -title's slug matches an existing\n\
+       note, the slice is appended to that note instead of creating a new one. The\n\
+       source trim and the new-note/append write happen in one transaction — neither\n\
+       lands without the other. Prints the target note's id (new or appended-to).\n\
+       Exits nonzero if no note matches or the range is empty/invalid.")
     (let%map_open.Command db_path = db_path_flag
      and ident = anon ("IDENT" %: string)
      and lines = flag "-lines" (required string) ~doc:"M-N 1-based inclusive line range"
@@ -215,19 +217,32 @@ let extract_command =
                  | t -> Some t)
              in
              let slug = Option.bind title ~f:Model.slug_of_title in
-             let new_id =
-               Db.extract_region
-                 db
-                 ~source_id:source.id
-                 ~source_body
-                 ~new_slug:slug
-                 ~new_kind:"note"
-                 ~new_title:title
-                 ~new_body
-                 ~new_entry_date:None
-                 ~new_metadata:None
-             in
-             printf "%d\n" new_id))
+             (* Mirror the TUI: a -title whose slug matches an existing note appends the
+                slice to that note (printing its id); otherwise create a new note. slug is
+                UNIQUE, so the lookup returns at most one target. *)
+             (match Option.bind slug ~f:(fun slug -> Db.get_by_slug db slug) with
+              | Some (target : Db.Note.t) ->
+                Db.append_region
+                  db
+                  ~source_id:source.id
+                  ~source_body
+                  ~target_id:target.id
+                  ~slice:new_body;
+                printf "%d\n" target.id
+              | None ->
+                let new_id =
+                  Db.extract_region
+                    db
+                    ~source_id:source.id
+                    ~source_body
+                    ~new_slug:slug
+                    ~new_kind:"note"
+                    ~new_title:title
+                    ~new_body
+                    ~new_entry_date:None
+                    ~new_metadata:None
+                in
+                printf "%d\n" new_id)))
 ;;
 
 let restore_command =

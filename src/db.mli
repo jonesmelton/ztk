@@ -99,6 +99,19 @@ val extract_region
   -> new_metadata:string option
   -> int
 
+(** Append a region to an existing note, atomically. In one transaction: append [slice] to
+    [target_id]'s body (joined by a blank line), then overwrite the source note
+    ([source_id]) body with [source_body] (the remainder after the slice was removed).
+    Raises if [target_id] does not exist, rolling back so the source is never trimmed
+    without the append landing. The [notes_au] trigger keeps FTS in sync on both writes. *)
+val append_region
+  :  t
+  -> source_id:int
+  -> source_body:string
+  -> target_id:int
+  -> slice:string
+  -> unit
+
 (** Full-text search via the [notes_fts] FTS5 index. [query] is a raw FTS5 MATCH
     expression; results are ranked best-first and capped at [limit]. [kind], if given,
     restricts to that note kind. *)

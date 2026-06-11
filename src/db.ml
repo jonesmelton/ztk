@@ -258,6 +258,27 @@ let extract_region
     new_id)
 ;;
 
+let append_region (t : t) ~source_id ~source_body ~target_id ~slice : unit =
+  with_txn t ~f:(fun t ->
+    (* Read the target inside the txn so a missing id aborts the whole thing — otherwise
+       the [update_body] no-op would silently trim the source without appending anywhere.
+       The slice joins the target's existing body with a blank-line separator. *)
+    let target =
+      match get_by_id t target_id with
+      | Some note -> note
+      | None -> failwithf "append_region: no note with id %d" target_id ()
+    in
+    if source_id = target_id
+    then
+      (* Appending into the same note we sliced from: the source trim and the append both
+         target one row, so do them as a single write off the post-slice remainder.
+         Writing them separately would let whichever ran last clobber the other. *)
+      update_body t ~id:source_id ~body:(source_body ^ "\n\n" ^ slice)
+    else (
+      update_body t ~id:target_id ~body:(target.body ^ "\n\n" ^ slice);
+      update_body t ~id:source_id ~body:source_body))
+;;
+
 let search (t : t) ~query ?kind ~limit () : Note.t list =
   let params, row = note_row in
   match kind with

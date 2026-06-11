@@ -264,6 +264,61 @@ let%expect_test "extract_region rolls back the source trim if the insert fails" 
     |}]
 ;;
 
+let%expect_test "append_region appends the slice to the target and trims the source \
+                 atomically"
+  =
+  let db = seeded_db () in
+  (* Extract a slice out of note 1 (source) and append it to note 2 (target). Both the
+     target append and the source trim land in one transaction. The slice joins the
+     target's existing body with a blank-line separator. *)
+  Db.append_region
+    db
+    ~source_id:1
+    ~source_body:"Hello, zet remainder."
+    ~target_id:2
+    ~slice:"the appended slice";
+  print_endline "-- source trimmed --";
+  print_s [%sexp (Option.map (Db.get_by_id db 1) ~f:Db.Note.body : string option)];
+  print_endline "-- target appended --";
+  print_s [%sexp (Option.map (Db.get_by_id db 2) ~f:Db.Note.body : string option)];
+  Db.close db;
+  [%expect
+    {|
+    -- source trimmed --
+    ("Hello, zet remainder.")
+    -- target appended --
+    ("Notes on the OCaml module system and functors.\n\nthe appended slice")
+    |}]
+;;
+
+let%expect_test "append_region rolls back the source trim if the target write fails" =
+  let db = seeded_db () in
+  let original = Option.map (Db.get_by_id db 1) ~f:Db.Note.body in
+  (* A non-existent target id makes the append a no-op update; we treat that as a failure
+     so the source is never trimmed without the append landing. *)
+  let raised =
+    Exn.does_raise (fun () ->
+      Db.append_region
+        db
+        ~source_id:1
+        ~source_body:"trimmed body that must not persist"
+        ~target_id:9999
+        ~slice:"orphan slice")
+  in
+  print_s [%sexp (raised : bool)];
+  print_endline "-- source unchanged --";
+  print_s
+    [%sexp
+      ([%equal: string option] (Option.map (Db.get_by_id db 1) ~f:Db.Note.body) original
+       : bool)];
+  Db.close db;
+  [%expect {|
+    true
+    -- source unchanged --
+    true
+    |}]
+;;
+
 let%expect_test "set_deleted hides a note from list_all, restore brings it back" =
   let db = seeded_db () in
   Db.set_deleted db ~id:3 ~deleted:true;
@@ -275,7 +330,8 @@ let%expect_test "set_deleted hides a note from list_all, restore brings it back"
   print_endline "-- after restore: note 3 back in default corpus --";
   show_titles (Db.list_all db);
   Db.close db;
-  [%expect {|
+  [%expect
+    {|
     -- after mark: note 3 gone from default corpus --
     1 hello-zet      note    Hello, zet
     2 ocaml-notes    note    OCaml type system
@@ -310,7 +366,8 @@ let%expect_test "set_deleted marks a note with NULL metadata without clobbering"
        |> Option.map ~f:(String.is_substring ~substring:"deleted")
        : bool option)];
   Db.close db;
-  [%expect {|
+  [%expect
+    {|
     -- note 5 hidden --
     1 hello-zet      note    Hello, zet
     2 ocaml-notes    note    OCaml type system
@@ -334,7 +391,8 @@ let%expect_test "sweep_deleted hard-deletes marked notes and reindexes FTS" =
   print_endline "-- second sweep is a no-op --";
   print_s [%sexp (Db.sweep_deleted db : int)];
   Db.close db;
-  [%expect {|
+  [%expect
+    {|
     -- sweep removes both, returns count --
     2
     -- survivors --
@@ -435,6 +493,43 @@ let%expect_test "extract composition: resolve, lift a line range, persist atomic
       (body "pick two\npick three")
       (entry_date ())
       (metadata   ())))
+    |}]
+;;
+
+let%expect_test "extract composition: a title matching an existing slug appends, no new \
+                 note"
+  =
+  let db = seeded_db () in
+  Db.update_body db ~id:1 ~body:"keep one\npick two\npick three\nkeep four";
+  let lo, hi = Option.value_exn (Zet.Cli.parse_line_range "2-3") in
+  let source = Option.value_exn (Zet.Cli.resolve_note db "hello-zet") in
+  let new_body, source_body = Zet.Model.extract_lines ~body:source.body ~lo ~hi in
+  (* "OCaml notes" slugs to "ocaml-notes" = note 2; the CLI forks to append. *)
+  let slug = Zet.Model.slug_of_title "OCaml notes" in
+  (match Option.bind slug ~f:(fun slug -> Db.get_by_slug db slug) with
+   | Some (target : Db.Note.t) ->
+     Db.append_region
+       db
+       ~source_id:source.id
+       ~source_body
+       ~target_id:target.id
+       ~slice:new_body
+   | None -> failwith "expected an existing slug match");
+  print_endline "-- source keeps the surviving lines, gap closed --";
+  print_s [%sexp (Option.map (Db.get_by_id db 1) ~f:Db.Note.body : string option)];
+  print_endline "-- note 2 received the appended slice --";
+  print_s [%sexp (Option.map (Db.get_by_id db 2) ~f:Db.Note.body : string option)];
+  print_endline "-- corpus unchanged at 5 (no new note) --";
+  print_s [%sexp (List.length (Db.list_all db) : int)];
+  Db.close db;
+  [%expect
+    {|
+    -- source keeps the surviving lines, gap closed --
+    ("keep one\nkeep four")
+    -- note 2 received the appended slice --
+    ("Notes on the OCaml module system and functors.\n\npick two\npick three")
+    -- corpus unchanged at 5 (no new note) --
+    5
     |}]
 ;;
 
@@ -1194,12 +1289,12 @@ let%expect_test "C-x C-e extracts a marked region into a new note, atomically" =
     (cursor (((position ((x 38) (y 1))) (kind Bar_blinking))))
     (cursor (((position ((x 38) (y 1))) (kind Bar_blinking))))
     ┌────────────────────────────────────────────────────────────────────────────────┐
-    │╭ Notes ──────────────────────╮╭ Extract  title?  C-x C-s save  C-g cancel ────╮│
-    ││> Hello, zet                 ││Kakapo                                         ││
-    ││  OCaml type system          ││                                               ││
-    ││  Morning pages              ││                                               ││
-    ││  Quick capture              ││                                               ││
-    ││  2026-05-28                 ││                                               ││
+    │╭ Related ────────────────────╮╭ Extract  C-x C-s save  C-g cancel ────────────╮│
+    ││                             ││Kakapo                                         ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││     (no related notes)      ││                                               ││
     ││                             ││                                               ││
     ││                             ││                                               ││
     ││                             ││                                               ││
@@ -1237,6 +1332,70 @@ let%expect_test "C-x C-e extracts a marked region into a new note, atomically" =
     |}]
 ;;
 
+let%expect_test "C-x C-e with a title matching an existing note appends to it instead of \
+                 creating"
+  =
+  let db, handle =
+    notes_handle_with_db ~initial_dimensions:{ width = 80; height = 12 } ()
+  in
+  (* Slice "This" out of note 1, then name the extraction "OCaml notes", which slugs to
+     "ocaml-notes" — note 2's slug. The Save handler keys the append/create fork on that
+     slug match, so the slice appends to note 2 rather than creating a sixth note. *)
+  Bonsai_term_test.send_event handle (key (ASCII 'e'));
+  Handle.recompute_view handle;
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII '@'));
+  Handle.recompute_view handle;
+  for _ = 1 to 4 do
+    Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'F'));
+    Handle.recompute_view handle
+  done;
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'X'));
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'E'));
+  Handle.recompute_view handle;
+  type_string_editor handle "OCaml notes";
+  Handle.recompute_view handle;
+  (* C-x C-s commits: the slug "ocaml-notes" matches note 2, so the slice appends to it
+     and no new note is created. *)
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'X'));
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'S'));
+  Handle.recompute_view handle;
+  print_endline "-- note 2 body: slice appended after a blank line --";
+  print_s [%sexp (Option.map (Db.get_by_id db 2) ~f:Db.Note.body : string option)];
+  print_endline "-- source note 1 trimmed --";
+  print_s [%sexp (Option.map (Db.get_by_id db 1) ~f:Db.Note.body : string option)];
+  print_endline "-- no new note created (corpus still 5) --";
+  print_s [%sexp (List.length (Db.list_all db) : int)];
+  [%expect
+    {|
+    (cursor (((position ((x 32) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 32) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 33) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 34) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 35) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 36) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 32) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 33) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 34) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 35) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 36) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 37) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 38) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 39) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 40) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 41) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 42) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 43) (y 1))) (kind Bar_blinking))))
+    (cursor (((position ((x 43) (y 1))) (kind Bar_blinking))))
+    (cursor ())
+    -- note 2 body: slice appended after a blank line --
+    ("Notes on the OCaml module system and functors.\n\nThis")
+    -- source note 1 trimmed --
+    (" is the first seeded note. It exists so the TUI has something to render while the data layer is wired up.")
+    -- no new note created (corpus still 5) --
+    5
+    |}]
+;;
+
 let%expect_test "d soft-deletes the selected note; it leaves the corpus but the row \
                  survives"
   =
@@ -1250,7 +1409,8 @@ let%expect_test "d soft-deletes the selected note; it leaves the corpus but the 
   Handle.recompute_view handle;
   Bonsai_term_test.send_event handle (key (ASCII 'd'));
   Handle.show handle;
-  [%expect {|
+  [%expect
+    {|
     (cursor ())
     (cursor ())
     ┌────────────────────────────────────────────────────────────────────────────────┐
@@ -1276,7 +1436,8 @@ let%expect_test "d soft-deletes the selected note; it leaves the corpus but the 
        : bool option)];
   print_endline "-- and hidden from the default corpus --";
   show_titles (Db.list_all db);
-  [%expect {|
+  [%expect
+    {|
     -- note 2 still in the table (soft-deleted, not swept) --
     (true)
     -- and hidden from the default corpus --
