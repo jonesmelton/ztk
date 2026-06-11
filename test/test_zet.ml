@@ -264,6 +264,89 @@ let%expect_test "extract_region rolls back the source trim if the insert fails" 
     |}]
 ;;
 
+let%expect_test "set_deleted hides a note from list_all, restore brings it back" =
+  let db = seeded_db () in
+  Db.set_deleted db ~id:3 ~deleted:true;
+  print_endline "-- after mark: note 3 gone from default corpus --";
+  show_titles (Db.list_all db);
+  print_endline "-- include_deleted shows it again --";
+  show_titles (Db.list_all ~include_deleted:true db);
+  Db.set_deleted db ~id:3 ~deleted:false;
+  print_endline "-- after restore: note 3 back in default corpus --";
+  show_titles (Db.list_all db);
+  Db.close db;
+  [%expect {|
+    -- after mark: note 3 gone from default corpus --
+    1 hello-zet      note    Hello, zet
+    2 ocaml-notes    note    OCaml type system
+    4 untagged-inbox inbox   Quick capture
+    5 -              journal 2026-05-28
+    -- include_deleted shows it again --
+    1 hello-zet      note    Hello, zet
+    2 ocaml-notes    note    OCaml type system
+    3 morning-pages  journal Morning pages
+    4 untagged-inbox inbox   Quick capture
+    5 -              journal 2026-05-28
+    -- after restore: note 3 back in default corpus --
+    1 hello-zet      note    Hello, zet
+    2 ocaml-notes    note    OCaml type system
+    3 morning-pages  journal Morning pages
+    4 untagged-inbox inbox   Quick capture
+    5 -              journal 2026-05-28
+    |}]
+;;
+
+let%expect_test "set_deleted marks a note with NULL metadata without clobbering" =
+  let db = seeded_db () in
+  (* Note 5 is the untitled journal with NULL metadata — json_set(NULL,...) would no-op
+     without the coalesce, so confirm the marker actually lands and hides it. *)
+  Db.set_deleted db ~id:5 ~deleted:true;
+  print_endline "-- note 5 hidden --";
+  show_titles (Db.list_all db);
+  print_endline "-- metadata now carries $.deleted --";
+  print_s
+    [%sexp
+      (Option.bind (Db.get_by_id db 5) ~f:Db.Note.metadata
+       |> Option.map ~f:(String.is_substring ~substring:"deleted")
+       : bool option)];
+  Db.close db;
+  [%expect {|
+    -- note 5 hidden --
+    1 hello-zet      note    Hello, zet
+    2 ocaml-notes    note    OCaml type system
+    3 morning-pages  journal Morning pages
+    4 untagged-inbox inbox   Quick capture
+    -- metadata now carries $.deleted --
+    (true)
+    |}]
+;;
+
+let%expect_test "sweep_deleted hard-deletes marked notes and reindexes FTS" =
+  let db = seeded_db () in
+  Db.set_deleted db ~id:2 ~deleted:true;
+  Db.set_deleted db ~id:3 ~deleted:true;
+  print_endline "-- sweep removes both, returns count --";
+  print_s [%sexp (Db.sweep_deleted db : int)];
+  print_endline "-- survivors --";
+  show_titles (Db.list_all ~include_deleted:true db);
+  print_endline "-- swept note 2's body no longer FTS-searchable --";
+  show_titles (Db.search db ~query:"functors" ~limit:10 ());
+  print_endline "-- second sweep is a no-op --";
+  print_s [%sexp (Db.sweep_deleted db : int)];
+  Db.close db;
+  [%expect {|
+    -- sweep removes both, returns count --
+    2
+    -- survivors --
+    1 hello-zet      note    Hello, zet
+    4 untagged-inbox inbox   Quick capture
+    5 -              journal 2026-05-28
+    -- swept note 2's body no longer FTS-searchable --
+    -- second sweep is a no-op --
+    0
+    |}]
+;;
+
 let%expect_test "resolve_note resolves by id then slug" =
   let db = seeded_db () in
   let title ident =
@@ -815,40 +898,40 @@ let%expect_test "? opens and closes the help overlay" =
     │╭ Notes ──────────────────────╮╭ Detail <tab> ─────────────────────────────────╮│
     ││> Hello, zet                 ││Hello, zet                                     ││
     ││  OCaml type system          ││#1  note                                       ││
-    ││  Morning ╭ Keybindings ──────────────────────────────────────────╮           ││
-    ││  Quick ca│ Navigation                                            │           ││
-    ││  2026-05-│ C-n / C-p      next / previous note                   │           ││
-    ││          │ C-a / C-e      first / last note                      │ists so the││
-    ││          │ Tab            switch list / detail pane              │e data     ││
-    ││          │ Enter          focus the detail pane                  │           ││
-    ││          │                                                       │           ││
-    ││          │ Detail pane                                           │           ││
-    ││          │ C-n / C-p      scroll body down / up                  │           ││
-    ││          │ C-a / C-e      top / bottom                           │           ││
-    ││          │                                                       │           ││
-    ││          │ Search                                                │           ││
-    ││          │ /              start full-text search                 │           ││
-    ││          │ C-b / C-f      move cursor left / right               │           ││
-    ││          │ C-k            kill to end of line                    │           ││
-    ││          │ C-w            kill word backward                     │           ││
-    ││          │ C-d / DEL      delete char forward / back             │           ││
-    ││          │ Enter          commit query, focus results            │           ││
-    ││          │ Esc            cancel search                          │           ││
-    ││          │                                                       │           ││
-    ││          │ Editing                                               │           ││
-    ││          │ e              edit selected note's body              │           ││
-    ││          │ C-Space        set mark (start region)                │           ││
-    ││          │ M-w            copy region                            │           ││
-    ││          │ C-y            yank (paste) copied text               │           ││
-    ││          │ C-x C-e        extract region to a new note           │           ││
-    ││          │ C-x C-s        save changes                           │           ││
-    ││          │ C-g            clear mark, else cancel without saving │           ││
-    ││          │                                                       │           ││
-    ││          │ General                                               │           ││
-    ││          │ ?              toggle this help                       │           ││
-    ││          │ C-g / Esc / q  close help                             │           ││
-    ││          ╰───────────────────────────────────────────────────────╯           ││
-    ││                             ││                                               ││
+    ││  Morning╭ Keybindings ─────────────────────────────────────────────╮         ││
+    ││  Quick c│ Navigation                                               │         ││
+    ││  2026-05│ C-n / C-p      next / previous note                      │         ││
+    ││         │ C-a / C-e      first / last note                         │ts so the││
+    ││         │ Tab            switch list / detail pane                 │data     ││
+    ││         │ Enter          focus the detail pane                     │         ││
+    ││         │                                                          │         ││
+    ││         │ Detail pane                                              │         ││
+    ││         │ C-n / C-p      scroll body down / up                     │         ││
+    ││         │ C-a / C-e      top / bottom                              │         ││
+    ││         │                                                          │         ││
+    ││         │ Search                                                   │         ││
+    ││         │ /              start full-text search                    │         ││
+    ││         │ C-b / C-f      move cursor left / right                  │         ││
+    ││         │ C-k            kill to end of line                       │         ││
+    ││         │ C-w            kill word backward                        │         ││
+    ││         │ C-d / DEL      delete char forward / back                │         ││
+    ││         │ Enter          commit query, focus results               │         ││
+    ││         │ Esc            cancel search                             │         ││
+    ││         │                                                          │         ││
+    ││         │ Editing                                                  │         ││
+    ││         │ e              edit selected note's body                 │         ││
+    ││         │ d              soft-delete note (sweep/restore headless) │         ││
+    ││         │ C-Space        set mark (start region)                   │         ││
+    ││         │ M-w            copy region                               │         ││
+    ││         │ C-y            yank (paste) copied text                  │         ││
+    ││         │ C-x C-e        extract region to a new note              │         ││
+    ││         │ C-x C-s        save changes                              │         ││
+    ││         │ C-g            clear mark, else cancel without saving    │         ││
+    ││         │                                                          │         ││
+    ││         │ General                                                  │         ││
+    ││         │ ?              toggle this help                          │         ││
+    ││         │ C-g / Esc / q  close help                                │         ││
+    ││         ╰──────────────────────────────────────────────────────────╯         ││
     ││                             ││                                               ││
     ││                             ││                                               ││
     │╰─────────────────────────────╯╰───────────────────────────────────────────────╯│
@@ -1151,6 +1234,56 @@ let%expect_test "C-x C-e extracts a marked region into a new note, atomically" =
       (metadata   ())))
     -- new note is FTS-searchable by its slug-derived title --
     6 kakapo         note    Kakapo
+    |}]
+;;
+
+let%expect_test "d soft-deletes the selected note; it leaves the corpus but the row \
+                 survives"
+  =
+  let db, handle =
+    notes_handle_with_db ~initial_dimensions:{ width = 80; height = 12 } ()
+  in
+  (* Move to note 2 (OCaml type system) and soft-delete it. [recompute_view] between the
+     motion and [d] flushes the cursor update so [d] reads the moved cursor, not a stale 0
+     — same batching hazard the chord machine documents. *)
+  Bonsai_term_test.send_event handle (key ~mods:[ Ctrl ] (ASCII 'N'));
+  Handle.recompute_view handle;
+  Bonsai_term_test.send_event handle (key (ASCII 'd'));
+  Handle.show handle;
+  [%expect {|
+    (cursor ())
+    (cursor ())
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │╭ Notes ──────────────────────╮╭ Detail <tab> ─────────────────────────────────╮│
+    ││  Hello, zet                 ││Morning pages                                  ││
+    ││> Morning pages              ││#3  journal                                    ││
+    ││  Quick capture              ││slug: morning-pages                            ││
+    ││  2026-05-28                 ││date: 2026-06-02                               ││
+    ││                             ││                                               ││
+    ││                             ││A journal entry that also mentions OCaml in    ││
+    ││                             ││passing.                                       ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    ││                             ││                                               ││
+    │╰─────────────────────────────╯╰───────────────────────────────────────────────╯│
+    └────────────────────────────────────────────────────────────────────────────────┘
+    |}];
+  print_endline "-- note 2 still in the table (soft-deleted, not swept) --";
+  print_s
+    [%sexp
+      (Option.bind (Db.get_by_id db 2) ~f:Db.Note.metadata
+       |> Option.map ~f:(String.is_substring ~substring:"deleted")
+       : bool option)];
+  print_endline "-- and hidden from the default corpus --";
+  show_titles (Db.list_all db);
+  [%expect {|
+    -- note 2 still in the table (soft-deleted, not swept) --
+    (true)
+    -- and hidden from the default corpus --
+    1 hello-zet      note    Hello, zet
+    3 morning-pages  journal Morning pages
+    4 untagged-inbox inbox   Quick capture
+    5 -              journal 2026-05-28
     |}]
 ;;
 

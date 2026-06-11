@@ -69,20 +69,35 @@ let note_row =
         { id; slug; kind; title; body; entry_date; metadata } ))
 ;;
 
-let list_all (t : t) : Note.t list =
-  S.exec_no_params_exn
-    t
-    {|   select id
-            , slug
-            , kind
-            , title
-            , body
-            , entry_date
-            , metadata
-       from notes
-   order by id|}
-    ~ty:note_row
-    ~f:S.Cursor.to_list
+let list_all ?(include_deleted = false) (t : t) : Note.t list =
+  (* A note is soft-deleted when its metadata JSON carries a [$.deleted] timestamp; the
+     default corpus hides those. [include_deleted] drops the filter for the headless
+     [list --all] and the sweep path. *)
+  let sql =
+    if include_deleted
+    then
+      {|   select id
+              , slug
+              , kind
+              , title
+              , body
+              , entry_date
+              , metadata
+         from notes
+     order by id|}
+    else
+      {|   select id
+              , slug
+              , kind
+              , title
+              , body
+              , entry_date
+              , metadata
+         from notes
+        where metadata ->> '$.deleted' is null
+     order by id|}
+  in
+  S.exec_no_params_exn t sql ~ty:note_row ~f:S.Cursor.to_list
 ;;
 
 let list_recent (t : t) ~limit : Note.t list =
@@ -150,6 +165,48 @@ let update_body (t : t) ~id ~body : unit =
     ~ty:S.Ty.(p2 text int)
     body
     id
+;;
+
+let set_deleted (t : t) ~id ~deleted : unit =
+  (* Soft-delete marker lives in the metadata JSON at [$.deleted]. Marking writes an
+     RFC3339-ish [datetime('now')] timestamp (so a later sweep can filter by age);
+     unmarking removes the key. [coalesce(metadata, '{}')] handles notes with NULL
+     metadata — [json_set(NULL, ...)] would otherwise yield NULL and silently no-op. The
+     [notes_au] trigger keeps FTS in sync on the update. *)
+  let sql =
+    if deleted
+    then
+      {|update notes
+           set metadata = json_set(coalesce(metadata, '{}'), '$.deleted', datetime('now'))
+         where id = ?|}
+    else
+      {|update notes
+           set metadata = json_remove(metadata, '$.deleted')
+         where id = ?|}
+  in
+  S.exec_no_cursor_exn t sql ~ty:S.Ty.(p1 int) id
+;;
+
+let sweep_deleted (t : t) : int =
+  (* Hard-delete every soft-deleted note in one transaction and return the count removed.
+     Irreversible: this is the only place rows actually leave the table. The [notes_ad]
+     trigger drops their FTS rows. Counted before the delete so the number reflects what
+     was swept. *)
+  with_txn t ~f:(fun t ->
+    let n =
+      S.exec_no_params_exn
+        t
+        {|select count(*)
+            from notes
+           where metadata ->> '$.deleted' is not null|}
+        ~ty:S.Ty.(p1 int, Fn.id)
+        ~f:(fun c -> S.Cursor.next c |> Option.value ~default:0)
+    in
+    S.exec0_exn
+      t
+      {|delete from notes
+         where metadata ->> '$.deleted' is not null|};
+    n)
 ;;
 
 let create_note (t : t) ~slug ~kind ~title ~body ~entry_date ~metadata : int =

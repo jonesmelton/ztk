@@ -207,6 +207,7 @@ let help_sections =
       ] )
   ; ( "Editing"
     , [ "e", "edit selected note's body"
+      ; "d", "soft-delete note (sweep/restore headless)"
       ; "C-Space", "set mark (start region)"
       ; "M-w", "copy region"
       ; "C-y", "yank (paste) copied text"

@@ -325,6 +325,7 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
     and editor_send_actions
     and editor_cursor
     and editor_text
+    and reload_notes
     and inject_chord in
     fun (event : Event.t) ->
       let discard eff = Effect.map eff ~f:(fun (_ : Captured_or_ignored.t) -> ()) in
@@ -340,6 +341,16 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
                 ; set_model (fun (m : Model_state.t) ->
                     { m with mode = Edit; editing_id = Some note.id })
                 ])
+         (* [d] soft-deletes the selected note: it vanishes from the corpus on reload but
+            the row survives (only [zet sweep] removes it). Reversible via [zet restore],
+            since a deleted note is no longer in the active corpus for the TUI to select.
+            The cursor is left as-is and clamps on the next motion. *)
+         | Key_press { key = ASCII 'd'; mods = [] }, Browse ->
+           (match List.nth active model.cursor with
+            | None -> Effect.return ()
+            | Some (note : Db.Note.t) ->
+              Db.set_deleted db ~id:note.id ~deleted:true;
+              reload_notes)
          | _ -> inject event)
       | Edit ->
         (match event with

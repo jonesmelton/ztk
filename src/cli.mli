@@ -1,7 +1,8 @@
 open! Core
 
 (** The full [zet] command: bare invocation launches the TUI on the default database;
-    subcommands ([tui], [list], [show], [search], [edit], [extract]) are headless mirrors. *)
+    subcommands ([tui], [list], [show], [search], [edit], [extract], [restore], [sweep])
+    are headless mirrors. *)
 val command : Command.t
 
 (** Print notes to stdout as [id<TAB>slug<TAB>kind<TAB>title], one per line — the stable,

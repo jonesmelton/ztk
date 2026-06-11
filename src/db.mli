@@ -39,8 +39,10 @@ val exec_script : t -> string -> unit
     reentrant: SQLite has no nested transactions, so [f] must not call [with_txn]. *)
 val with_txn : t -> f:(t -> 'a) -> 'a
 
-(** All notes, ordered by id. Hard-coded query for the initial wiring. *)
-val list_all : t -> Note.t list
+(** Notes ordered by id. Soft-deleted notes (those carrying a [$.deleted] timestamp in
+    their metadata) are excluded by default; pass [~include_deleted:true] to return them
+    too (used by [list --all] and the sweep path). *)
+val list_all : ?include_deleted:bool -> t -> Note.t list
 
 (** Most recent notes first (by [entry_date] then [id]), capped at [limit]. *)
 val list_recent : t -> limit:int -> Note.t list
@@ -54,6 +56,18 @@ val get_by_slug : t -> string -> Note.t option
 (** Overwrite the body of the note with [id]. The FTS index is kept in sync by the
     [notes_au] trigger. Naive overwrite with no revision history. *)
 val update_body : t -> id:int -> body:string -> unit
+
+(** Soft-delete or restore the note with [id] by setting or clearing a [$.deleted]
+    timestamp in its metadata JSON. Marking ([~deleted:true]) hides it from the default
+    [list_all] corpus but leaves the row intact and recoverable; unmarking
+    ([~deleted:false]) restores it. The actual row is only removed by [sweep_deleted]. The
+    [notes_au] trigger keeps the FTS index in sync. *)
+val set_deleted : t -> id:int -> deleted:bool -> unit
+
+(** Hard-delete every soft-deleted note (those with a [$.deleted] metadata timestamp) in a
+    single transaction, returning the number of rows removed. Irreversible — this is the
+    only path that deletes rows. The [notes_ad] trigger drops the corresponding FTS rows. *)
+val sweep_deleted : t -> int
 
 (** Insert a new note and return its id. [slug], [title], [entry_date], and [metadata] are
     nullable; [kind] must satisfy the schema's check constraint

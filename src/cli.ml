@@ -65,17 +65,20 @@ let list_command =
     ~summary:"list notes (headless mirror of the TUI list pane)"
     ~readme:(fun () ->
       "Prints notes as: id<TAB>slug<TAB>kind<TAB>title. With -recent N, shows the\n\
-       N most recent by entry date; otherwise all notes ordered by id.")
+       N most recent by entry date; otherwise all notes ordered by id. Soft-deleted\n\
+       notes are hidden unless -all is given.")
     (let%map_open.Command db_path = db_path_flag
      and recent =
        flag "-recent" (optional int) ~doc:"N show the N most recent notes instead of all"
+     and all =
+       flag "-all" no_arg ~doc:" include soft-deleted notes (hidden by default)"
      in
      fun () ->
        let notes =
          Db.with_db db_path ~f:(fun db ->
            match recent with
            | Some limit -> Db.list_recent db ~limit
-           | None -> Db.list_all db)
+           | None -> Db.list_all ~include_deleted:all db)
        in
        print_notes notes)
 ;;
@@ -227,6 +230,38 @@ let extract_command =
              printf "%d\n" new_id))
 ;;
 
+let restore_command =
+  Command.basic
+    ~summary:"clear a note's soft-delete mark (un-delete)"
+    ~readme:(fun () ->
+      "IDENT is a note id (integer) or a slug. Removes the $.deleted marker so the\n\
+       note reappears in the default list and TUI corpus. Use `zet list -all` to find\n\
+       soft-deleted notes. Exits nonzero if no note matches.")
+    (let%map_open.Command db_path = db_path_flag
+     and ident = anon ("IDENT" %: string) in
+     fun () ->
+       Db.with_db db_path ~f:(fun db ->
+         match resolve_note db ident with
+         | None ->
+           prerr_endline (sprintf "no note matching %S" ident);
+           exit 1
+         | Some n -> Db.set_deleted db ~id:n.id ~deleted:false))
+;;
+
+let sweep_command =
+  Command.basic
+    ~summary:"permanently delete all soft-deleted notes"
+    ~readme:(fun () ->
+      "Hard-deletes every note marked for deletion (those carrying a $.deleted\n\
+       marker, e.g. via the TUI `d` key). This is irreversible — there is no\n\
+       revision history. Prints the number of notes removed. Review first with\n\
+       `zet list -all`; un-delete individual notes with `zet restore IDENT`.")
+    (let%map_open.Command db_path = db_path_flag in
+     fun () ->
+       let n = Db.with_db db_path ~f:Db.sweep_deleted in
+       printf "swept %d note%s\n" n (if n = 1 then "" else "s"))
+;;
+
 let command =
   Command.group
     ~summary:{|zet — zettelkasten TUI + headless CLI|}
@@ -241,5 +276,7 @@ let command =
     ; "search", search_command
     ; "edit", edit_command
     ; "extract", extract_command
+    ; "restore", restore_command
+    ; "sweep", sweep_command
     ]
 ;;
