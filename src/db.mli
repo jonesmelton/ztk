@@ -53,9 +53,34 @@ val get_by_id : t -> int -> Note.t option
 (** The note with this slug, if any. *)
 val get_by_slug : t -> string -> Note.t option
 
+(** Whether any note already uses [slug]. slug is UNIQUE, so this answers whether an
+    insert or update carrying [slug] would collide. *)
+val slug_exists : t -> string -> bool
+
+(** A free slug derived from [base]: [base] itself if unused, else the first [base-N] (N
+    starting at 2) that is unused. Mirrors the web forms' collision suffixing. *)
+val unique_slug : t -> string -> string
+
 (** Overwrite the body of the note with [id]. The FTS index is kept in sync by the
     [notes_au] trigger. Naive overwrite with no revision history. *)
 val update_body : t -> id:int -> body:string -> unit
+
+(** Full-field overwrite of the note with [id], mirroring the web [note-edit] POST:
+    rewrites [slug], [kind], [title], [body], [entry_date], [metadata] and bumps
+    [updated_at]. Any slug/entry_date derivation policy is the caller's; this writes
+    exactly what it is given. [kind] must satisfy the schema check
+    ('journal'|'note'|'inbox'). The [notes_au] trigger keeps FTS in sync. No revision
+    history. *)
+val update_note
+  :  t
+  -> id:int
+  -> slug:string option
+  -> kind:string
+  -> title:string option
+  -> body:string
+  -> entry_date:string option
+  -> metadata:string option
+  -> unit
 
 (** Soft-delete or restore the note with [id] by setting or clearing a [$.deleted]
     timestamp in its metadata JSON. Marking ([~deleted:true]) hides it from the default

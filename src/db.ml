@@ -156,6 +156,31 @@ let get_by_slug (t : t) slug : Note.t option =
     slug
 ;;
 
+let slug_exists (t : t) slug : bool =
+  S.exec_exn
+    t
+    {|select 1
+        from notes
+       where slug = ?
+       limit 1|}
+    ~ty:(S.Ty.p1 S.Ty.text, S.Ty.p1 S.Ty.int, Fn.id)
+    ~f:(fun c -> Option.is_some (S.Cursor.next c))
+    slug
+;;
+
+let unique_slug (t : t) base : string =
+  (* Mirror the Ruby [unique_slug]: return [base] if free, else the first [base-N] (N>=2)
+     that is. slug is UNIQUE, so a colliding insert would raise; this picks the next gap. *)
+  if not (slug_exists t base)
+  then base
+  else (
+    let rec find n =
+      let candidate = sprintf "%s-%d" base n in
+      if slug_exists t candidate then find (n + 1) else candidate
+    in
+    find 2)
+;;
+
 let update_body (t : t) ~id ~body : unit =
   S.exec_no_cursor_exn
     t
@@ -164,6 +189,34 @@ let update_body (t : t) ~id ~body : unit =
        where id = ?|}
     ~ty:S.Ty.(p2 text int)
     body
+    id
+;;
+
+let update_note (t : t) ~id ~slug ~kind ~title ~body ~entry_date ~metadata : unit =
+  (* Full-field overwrite mirroring the web [note-edit] POST: every column the form owns
+     is rewritten and [updated_at] bumped. slug/entry_date derivation is the caller's
+     policy; this just writes what it is handed. The [notes_au] trigger keeps FTS in sync. *)
+  S.exec_no_cursor_exn
+    t
+    {|update notes
+         set slug = ?
+           , kind = ?
+           , title = ?
+           , body = ?
+           , entry_date = ?
+           , metadata = ?
+           , updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+       where id = ?|}
+    ~ty:
+      S.Ty.(
+        p6 (nullable text) text (nullable text) text (nullable text) (nullable text)
+        @>> p1 int)
+    slug
+    kind
+    title
+    body
+    entry_date
+    metadata
     id
 ;;
 

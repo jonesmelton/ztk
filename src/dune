@@ -9,6 +9,7 @@
   core
   core_unix
   sqlite3
-  sqlite3_utils)
+  sqlite3_utils
+  yojson)
  (preprocess
   (pps ppx_jane bonsai.ppx_bonsai)))

@@ -190,6 +190,67 @@ let%expect_test "create_note allows null slug and title" =
     |}]
 ;;
 
+let%expect_test "unique_slug returns the base when free, else the first open suffix" =
+  let db = seeded_db () in
+  (* 'hello-zet' and 'ocaml-notes' are seeded; 'fresh' is not. *)
+  print_endline (Db.unique_slug db "fresh");
+  print_endline (Db.unique_slug db "hello-zet");
+  (* Once hello-zet-2 also exists, the next request skips to -3. *)
+  let (_ : int) =
+    Db.create_note
+      db
+      ~slug:(Some "hello-zet-2")
+      ~kind:"note"
+      ~title:None
+      ~body:"x"
+      ~entry_date:None
+      ~metadata:None
+  in
+  print_endline (Db.unique_slug db "hello-zet");
+  Db.close db;
+  [%expect {|
+    fresh
+    hello-zet-2
+    hello-zet-3
+    |}]
+;;
+
+let%expect_test "update_note rewrites every form-owned field and reindexes FTS" =
+  let db = seeded_db () in
+  Db.update_note
+    db
+    ~id:4
+    ~slug:(Some "now-a-note")
+    ~kind:"note"
+    ~title:(Some "Reclassified inbox")
+    ~body:"Now mentions kakapo."
+    ~entry_date:None
+    ~metadata:(Some {|{"tags":["reclassified"]}|});
+  print_s [%sexp (Db.get_by_id db 4 : Db.Note.t option)];
+  print_endline "-- fts sees the new body --";
+  show_titles (Db.search db ~query:"kakapo" ~limit:10 ());
+  print_endline "-- tags read back --";
+  print_s
+    [%sexp
+      (Option.value_map (Db.get_by_id db 4) ~default:[] ~f:(Db.tags_of db) : string list)];
+  Db.close db;
+  [%expect
+    {|
+    ((
+      (id 4)
+      (slug (now-a-note))
+      (kind note)
+      (title ("Reclassified inbox"))
+      (body "Now mentions kakapo.")
+      (entry_date ())
+      (metadata ("{\"tags\":[\"reclassified\"]}"))))
+    -- fts sees the new body --
+    4 now-a-note     note    Reclassified inbox
+    -- tags read back --
+    (reclassified)
+    |}]
+;;
+
 let%expect_test "extract_region atomically creates the new note and trims the source" =
   let db = seeded_db () in
   (* Source note 1 body becomes the remainder; the extracted slice becomes a new note.
