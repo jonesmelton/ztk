@@ -41,11 +41,13 @@ val with_txn : t -> f:(t -> 'a) -> 'a
 
 (** Notes ordered by id. Soft-deleted notes (those carrying a [$.deleted] timestamp in
     their metadata) are excluded by default; pass [~include_deleted:true] to return them
-    too (used by [list --all] and the sweep path). *)
-val list_all : ?include_deleted:bool -> t -> Note.t list
+    too (used by [list --all] and the sweep path). [kind], if given, restricts to that
+    note kind. *)
+val list_all : ?include_deleted:bool -> ?kind:string -> t -> Note.t list
 
-(** Most recent notes first (by [entry_date] then [id]), capped at [limit]. *)
-val list_recent : t -> limit:int -> Note.t list
+(** Most recent notes first (by [entry_date] then [id]), capped at [limit]. [kind], if
+    given, restricts to that note kind before the limit is applied. *)
+val list_recent : ?kind:string -> t -> limit:int -> Note.t list
 
 (** The note with this id, if any. *)
 val get_by_id : t -> int -> Note.t option

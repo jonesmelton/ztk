@@ -69,55 +69,88 @@ let note_row =
         { id; slug; kind; title; body; entry_date; metadata } ))
 ;;
 
-let list_all ?(include_deleted = false) (t : t) : Note.t list =
+let list_all ?(include_deleted = false) ?kind (t : t) : Note.t list =
   (* A note is soft-deleted when its metadata JSON carries a [$.deleted] timestamp; the
      default corpus hides those. [include_deleted] drops the filter for the headless
-     [list --all] and the sweep path. *)
-  let sql =
-    if include_deleted
-    then
-      {|   select id
-              , slug
-              , kind
-              , title
-              , body
-              , entry_date
-              , metadata
-         from notes
-     order by id|}
-    else
-      {|   select id
-              , slug
-              , kind
-              , title
-              , body
-              , entry_date
-              , metadata
-         from notes
-        where metadata ->> '$.deleted' is null
-     order by id|}
+     [list --all] and the sweep path. [kind], if given, restricts to that note kind. *)
+  let deleted_clause =
+    if include_deleted then "" else " and metadata ->> '$.deleted' is null"
   in
-  S.exec_no_params_exn t sql ~ty:note_row ~f:S.Cursor.to_list
+  match kind with
+  | None ->
+    let sql =
+      sprintf
+        {|   select id
+                , slug
+                , kind
+                , title
+                , body
+                , entry_date
+                , metadata
+           from notes
+          where 1 = 1%s
+       order by id|}
+        deleted_clause
+    in
+    S.exec_no_params_exn t sql ~ty:note_row ~f:S.Cursor.to_list
+  | Some kind ->
+    let params, row = note_row in
+    let sql =
+      sprintf
+        {|   select id
+                , slug
+                , kind
+                , title
+                , body
+                , entry_date
+                , metadata
+           from notes
+          where kind = ?%s
+       order by id|}
+        deleted_clause
+    in
+    S.exec_exn t sql ~ty:(S.Ty.p1 S.Ty.text, params, row) ~f:S.Cursor.to_list kind
 ;;
 
-let list_recent (t : t) ~limit : Note.t list =
+let list_recent ?kind (t : t) ~limit : Note.t list =
   let params, row = note_row in
-  S.exec_exn
-    t
-    {|   select id
-            , slug
-            , kind
-            , title
-            , body
-            , entry_date
-            , metadata
-       from notes
-   order by entry_date desc
-            , id desc
-      limit ?|}
-    ~ty:(S.Ty.p1 S.Ty.int, params, row)
-    ~f:S.Cursor.to_list
-    limit
+  match kind with
+  | None ->
+    S.exec_exn
+      t
+      {|   select id
+              , slug
+              , kind
+              , title
+              , body
+              , entry_date
+              , metadata
+         from notes
+     order by entry_date desc
+              , id desc
+        limit ?|}
+      ~ty:(S.Ty.p1 S.Ty.int, params, row)
+      ~f:S.Cursor.to_list
+      limit
+  | Some kind ->
+    S.exec_exn
+      t
+      {|   select id
+              , slug
+              , kind
+              , title
+              , body
+              , entry_date
+              , metadata
+         from notes
+        where kind = ?
+     order by entry_date desc
+              , id desc
+        limit ?|}
+      ~ty:(S.Ty.(p2 text int), params, row)
+      ~f:S.Cursor.to_list
+      kind
+      limit
 ;;
 
 let get_by_id (t : t) id : Note.t option =

@@ -651,6 +651,56 @@ let%expect_test "print_notes emits the headless tab-separated format" =
     |}]
 ;;
 
+let%expect_test "list_all -kind restricts to one kind; list_recent -kind too" =
+  let db = seeded_db () in
+  print_endline "-- list_all kind=note --";
+  show_titles (Db.list_all db ~kind:"note");
+  print_endline "-- list_all kind=journal --";
+  show_titles (Db.list_all db ~kind:"journal");
+  (* kind filter applies before the limit: only journals, newest first, capped at 1. *)
+  print_endline "-- list_recent kind=journal limit=1 --";
+  show_titles (Db.list_recent db ~kind:"journal" ~limit:1);
+  Db.close db;
+  [%expect
+    {|
+    -- list_all kind=note --
+    1 hello-zet      note    Hello, zet
+    2 ocaml-notes    note    OCaml type system
+    -- list_all kind=journal --
+    3 morning-pages  journal Morning pages
+    5 -              journal 2026-05-28
+    -- list_recent kind=journal limit=1 --
+    3 morning-pages  journal Morning pages
+    |}]
+;;
+
+let%expect_test "print_notes_json: raw fields, parsed metadata+tags, body snippet" =
+  let db = seeded_db () in
+  (* hello-zet (tagged note), untagged-inbox (NULL metadata), and the untitled journal
+     (NULL slug+title) together exercise every nullable column and the tag extraction. *)
+  let notes =
+    List.filter_map [ "hello-zet"; "untagged-inbox" ] ~f:(Db.get_by_slug db)
+    @ Option.to_list (Db.get_by_id db 5)
+  in
+  Zet.Cli.print_notes_json notes;
+  Db.close db;
+  [%expect
+    {|
+    {"id":1,"kind":"note","slug":"hello-zet","title":"Hello, zet","entry_date":"2026-06-03","metadata":{"tags":["seed","demo"]},"tags":["seed","demo"],"snippet":"This is the first seeded note. It exists so the TUI has some…"}
+    {"id":4,"kind":"inbox","slug":"untagged-inbox","title":"Quick capture","entry_date":"2026-05-30","metadata":null,"tags":[],"snippet":"An inbox item with no tags and no metadata at all."}
+    {"id":5,"kind":"journal","slug":null,"title":null,"entry_date":"2026-05-28","metadata":null,"tags":[],"snippet":"A journal entry with no slug and no title, only a body."}
+    |}]
+;;
+
+let%expect_test "print_note_json: single object with full body" =
+  let db = seeded_db () in
+  let n = Option.value_exn (Db.get_by_slug db "ocaml-notes") in
+  Zet.Cli.print_note_json n;
+  Db.close db;
+  [%expect
+    {| {"id":2,"kind":"note","slug":"ocaml-notes","title":"OCaml type system","entry_date":"2026-06-01","metadata":{"tags":["ocaml","demo"]},"tags":["ocaml","demo"],"body":"Notes on the OCaml module system and functors."} |}]
+;;
+
 let notes_handle ?initial_dimensions () =
   let db = seeded_db () in
   Bonsai_term_test.create_handle ?initial_dimensions (Zet.App.app ~db)

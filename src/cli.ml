@@ -35,6 +35,70 @@ let print_notes (notes : Db.Note.t list) =
          ]))
 ;;
 
+(* [n.metadata] is a raw JSON string (or NULL). Parse it back to a Yojson value so the
+   machine-readable output nests it as real JSON rather than a string-encoded blob; on a
+   NULL column or unparseable text, emit [`Null] rather than raising — the consumer can
+   still read the other fields. *)
+let metadata_json (n : Db.Note.t) : Yojson.Safe.t =
+  match n.metadata with
+  | None -> `Null
+  | Some s ->
+    (try Yojson.Safe.from_string s with
+     | _ -> `Null)
+;;
+
+(* Tags pulled out of the parsed metadata ([$.tags]), without a second DB roundtrip. Any
+   shape other than an array of strings yields []. *)
+let tags_json (meta : Yojson.Safe.t) : Yojson.Safe.t =
+  match meta with
+  | `Assoc kvs ->
+    (match List.Assoc.find kvs "tags" ~equal:String.equal with
+     | Some (`List _ as l) -> l
+     | _ -> `List [])
+  | _ -> `List []
+;;
+
+let str_or_null = function
+  | Some s -> `String s
+  | None -> `Null
+;;
+
+(* First [n] characters of the body, the label the site renders for untitled notes. Cut on
+   characters (the bodies are ASCII-ish markdown); whitespace at the edges is trimmed and
+   a trailing ellipsis marks truncation. *)
+let body_snippet ?(len = 60) body =
+  let body = String.strip body in
+  if String.length body <= len then body else String.rstrip (String.prefix body len) ^ "…"
+;;
+
+(* Common raw row fields shared by every JSON variant. [body] differs (full vs snippet) so
+   the caller appends it. *)
+let note_json_base (n : Db.Note.t) =
+  let meta = metadata_json n in
+  [ "id", `Int n.id
+  ; "kind", `String n.kind
+  ; "slug", str_or_null n.slug
+  ; "title", str_or_null n.title
+  ; "entry_date", str_or_null n.entry_date
+  ; "metadata", meta
+  ; "tags", tags_json meta
+  ]
+;;
+
+(* Per-note JSON for [list]/[search]: raw fields plus a short body [snippet], no full
+   body. *)
+let print_notes_json (notes : Db.Note.t list) =
+  List.iter notes ~f:(fun n ->
+    let obj = `Assoc (note_json_base n @ [ "snippet", `String (body_snippet n.body) ]) in
+    print_endline (Yojson.Safe.to_string obj))
+;;
+
+(* Full single-note JSON for [show]: raw fields plus the complete [body]. *)
+let print_note_json (n : Db.Note.t) =
+  let obj = `Assoc (note_json_base n @ [ "body", `String n.body ]) in
+  print_endline (Yojson.Safe.to_string obj)
+;;
+
 (* [with_db] closes synchronously; the Bonsai loop keeps querying until the user quits, so
    we close only after the deferred from [Bonsai_term.start] resolves. *)
 let launch_tui db_path =
@@ -65,22 +129,26 @@ let list_command =
     ~summary:"list notes (headless mirror of the TUI list pane)"
     ~readme:(fun () ->
       "Prints notes as: id<TAB>slug<TAB>kind<TAB>title. With -recent N, shows the\n\
-       N most recent by entry date; otherwise all notes ordered by id. Soft-deleted\n\
-       notes are hidden unless -all is given.")
+       N most recent by entry date; otherwise all notes ordered by id. -kind restricts\n\
+       to one kind (journal|note|inbox). Soft-deleted notes are hidden unless -all is\n\
+       given. With -json, emits one JSON object per line carrying the raw row fields\n\
+       (id, kind, slug, title, entry_date, metadata, tags) plus a body snippet.")
     (let%map_open.Command db_path = db_path_flag
      and recent =
        flag "-recent" (optional int) ~doc:"N show the N most recent notes instead of all"
-     and all =
-       flag "-all" no_arg ~doc:" include soft-deleted notes (hidden by default)"
+     and kind = flag "-kind" (optional string) ~doc:"KIND restrict to journal|note|inbox"
+     and all = flag "-all" no_arg ~doc:" include soft-deleted notes (hidden by default)"
+     and json =
+       flag "-json" no_arg ~doc:" emit one JSON object per line instead of TSV"
      in
      fun () ->
        let notes =
          Db.with_db db_path ~f:(fun db ->
            match recent with
-           | Some limit -> Db.list_recent db ~limit
-           | None -> Db.list_all ~include_deleted:all db)
+           | Some limit -> Db.list_recent ?kind db ~limit
+           | None -> Db.list_all ~include_deleted:all ?kind db)
        in
-       print_notes notes)
+       if json then print_notes_json notes else print_notes notes)
 ;;
 
 let valid_kinds = [ "journal"; "note"; "inbox" ]
@@ -118,15 +186,19 @@ let show_command =
     ~summary:"print a single note's body (headless mirror of the TUI detail pane)"
     ~readme:(fun () ->
       "IDENT is a note id (integer) or a slug. Prints a metadata header followed\n\
-       by the note body. Exits nonzero if no note matches.")
+       by the note body. With -json, emits a single JSON object with the raw row\n\
+       fields (id, kind, slug, title, entry_date, metadata, tags) and the full body.\n\
+       Exits nonzero if no note matches.")
     (let%map_open.Command db_path = db_path_flag
-     and ident = anon ("IDENT" %: string) in
+     and ident = anon ("IDENT" %: string)
+     and json = flag "-json" no_arg ~doc:" emit a single JSON object instead of text" in
      fun () ->
        let note = Db.with_db db_path ~f:(fun db -> resolve_note db ident) in
        match note with
        | None ->
          prerr_endline (sprintf "no note matching %S" ident);
          exit 1
+       | Some n when json -> print_note_json n
        | Some n ->
          printf "# %s\n" (Db.Note.display_title n);
          printf "id: %d\tkind: %s" n.id n.kind;
@@ -143,17 +215,20 @@ let search_command =
     ~summary:"full-text search notes (headless mirror of the TUI search)"
     ~readme:(fun () ->
       "QUERY is a raw FTS5 MATCH expression (e.g. 'ocaml', 'type NEAR system').\n\
-       Prints matching notes, best-ranked first, as: id<TAB>slug<TAB>kind<TAB>title.")
+       Prints matching notes, best-ranked first, as: id<TAB>slug<TAB>kind<TAB>title.\n\
+       With -json, emits one JSON object per line carrying the raw row fields (id, kind,\n\
+       slug, title, entry_date, metadata, tags) plus a body snippet.")
     (let%map_open.Command db_path = db_path_flag
      and kind = flag "-kind" (optional string) ~doc:"KIND restrict to journal|note|inbox"
      and limit =
        flag "-limit" (optional_with_default 50 int) ~doc:"N max results (default: 50)"
+     and json = flag "-json" no_arg ~doc:" emit one JSON object per line instead of TSV"
      and query = anon ("QUERY" %: string) in
      fun () ->
        let notes =
          Db.with_db db_path ~f:(fun db -> Db.search db ~query ?kind ~limit ())
        in
-       print_notes notes)
+       if json then print_notes_json notes else print_notes notes)
 ;;
 
 let read_body ~body ~file =
