@@ -71,8 +71,7 @@ let note_row =
 
 let list_all ?(include_deleted = false) ?kind (t : t) : Note.t list =
   (* A note is soft-deleted when its metadata JSON carries a [$.deleted] timestamp; the
-     default corpus hides those. [include_deleted] drops the filter for the headless
-     [list --all] and the sweep path. [kind], if given, restricts to that note kind. *)
+     default corpus hides those. [include_deleted] drops the filter. *)
   let deleted_clause =
     if include_deleted then "" else " and metadata ->> '$.deleted' is null"
   in

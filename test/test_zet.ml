@@ -253,8 +253,6 @@ let%expect_test "update_note rewrites every form-owned field and reindexes FTS" 
 
 let%expect_test "extract_region atomically creates the new note and trims the source" =
   let db = seeded_db () in
-  (* Source note 1 body becomes the remainder; the extracted slice becomes a new note.
-     Both writes happen in one transaction. *)
   let new_id =
     Db.extract_region
       db
@@ -329,9 +327,6 @@ let%expect_test "append_region appends the slice to the target and trims the sou
                  atomically"
   =
   let db = seeded_db () in
-  (* Extract a slice out of note 1 (source) and append it to note 2 (target). Both the
-     target append and the source trim land in one transaction. The slice joins the
-     target's existing body with a blank-line separator. *)
   Db.append_region
     db
     ~source_id:1
@@ -518,7 +513,6 @@ let%expect_test "parse_line_range accepts M-N and bare N" =
 
 let%expect_test "extract composition: resolve, lift a line range, persist atomically" =
   let db = seeded_db () in
-  (* Give note 1 a multi-line body, then extract lines 2-3 into a new titled note. *)
   Db.update_body db ~id:1 ~body:"keep one\npick two\npick three\nkeep four";
   let lo, hi = Option.value_exn (Zet.Cli.parse_line_range "2-3") in
   let source = Option.value_exn (Zet.Cli.resolve_note db "hello-zet") in
@@ -689,6 +683,33 @@ let%expect_test "print_notes_json: raw fields, parsed metadata+tags, body snippe
     {"id":1,"kind":"note","slug":"hello-zet","title":"Hello, zet","entry_date":"2026-06-03","metadata":{"tags":["seed","demo"]},"tags":["seed","demo"],"snippet":"This is the first seeded note. It exists so the TUI has some…"}
     {"id":4,"kind":"inbox","slug":"untagged-inbox","title":"Quick capture","entry_date":"2026-05-30","metadata":null,"tags":[],"snippet":"An inbox item with no tags and no metadata at all."}
     {"id":5,"kind":"journal","slug":null,"title":null,"entry_date":"2026-05-28","metadata":null,"tags":[],"snippet":"A journal entry with no slug and no title, only a body."}
+    |}]
+;;
+
+let%expect_test "body_snippet: cuts on UTF-8 boundary, never mid-character" =
+  (* A 3-byte smart quote (’ = e2 80 99) as the 61st char is the first dropped by the
+     60-char cut. A byte-offset slice would keep its lead byte (e2) and emit invalid
+     UTF-8; the boundary-aware cut drops it whole. *)
+  let body = String.make 60 'a' ^ "’tail" in
+  let snip = Zet.Cli.body_snippet body in
+  printf "%s\n" snip;
+  (* Result must round-trip as valid UTF-8: re-decode every codepoint without hitting the
+     replacement char that a malformed byte would produce. *)
+  let valid =
+    let rec loop i =
+      if i >= String.length snip
+      then true
+      else (
+        let d = Stdlib.String.get_utf_8_uchar snip i in
+        Stdlib.Uchar.utf_decode_is_valid d && loop (i + Stdlib.Uchar.utf_decode_length d))
+    in
+    loop 0
+  in
+  printf "valid_utf8=%b\n" valid;
+  [%expect
+    {|
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…
+    valid_utf8=true
     |}]
 ;;
 

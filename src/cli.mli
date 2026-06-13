@@ -9,6 +9,11 @@ val command : Command.t
     greppable format the headless subcommands emit. *)
 val print_notes : Db.Note.t list -> unit
 
+(** First [len] (default 60) Unicode characters of [body], stripped, with a trailing
+    ellipsis when truncated. Cuts on UTF-8 codepoint boundaries so the result is always
+    valid UTF-8 — never a partial multibyte character. *)
+val body_snippet : ?len:int -> string -> string
+
 (** Machine-readable [list]/[search] output: one JSON object per line, each carrying the
     raw row fields ([id], [kind], [slug], [title], [entry_date], [metadata], [tags]) plus
     a body [snippet]. Nullable columns serialize as JSON [null]; [metadata] is the

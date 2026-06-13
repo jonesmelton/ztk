@@ -47,8 +47,6 @@ let metadata_json (n : Db.Note.t) : Yojson.Safe.t =
      | _ -> `Null)
 ;;
 
-(* Tags pulled out of the parsed metadata ([$.tags]), without a second DB roundtrip. Any
-   shape other than an array of strings yields []. *)
 let tags_json (meta : Yojson.Safe.t) : Yojson.Safe.t =
   match meta with
   | `Assoc kvs ->
@@ -63,16 +61,24 @@ let str_or_null = function
   | None -> `Null
 ;;
 
-(* First [n] characters of the body, the label the site renders for untitled notes. Cut on
-   characters (the bodies are ASCII-ish markdown); whitespace at the edges is trimmed and
-   a trailing ellipsis marks truncation. *)
+(* Cut on UTF-8 codepoint boundaries (never mid-character) so the snippet is always valid
+   UTF-8 — a byte-offset slice can shear a multibyte char and emit a dangling lead byte. *)
 let body_snippet ?(len = 60) body =
   let body = String.strip body in
-  if String.length body <= len then body else String.rstrip (String.prefix body len) ^ "…"
+  let rec boundary byte_off chars_left =
+    if chars_left = 0
+    then Some byte_off
+    else if byte_off >= String.length body
+    then None
+    else (
+      let d = Stdlib.String.get_utf_8_uchar body byte_off in
+      boundary (byte_off + Stdlib.Uchar.utf_decode_length d) (chars_left - 1))
+  in
+  match boundary 0 len with
+  | None -> body
+  | Some cut -> String.rstrip (String.prefix body cut) ^ "…"
 ;;
 
-(* Common raw row fields shared by every JSON variant. [body] differs (full vs snippet) so
-   the caller appends it. *)
 let note_json_base (n : Db.Note.t) =
   let meta = metadata_json n in
   [ "id", `Int n.id
@@ -85,15 +91,12 @@ let note_json_base (n : Db.Note.t) =
   ]
 ;;
 
-(* Per-note JSON for [list]/[search]: raw fields plus a short body [snippet], no full
-   body. *)
 let print_notes_json (notes : Db.Note.t list) =
   List.iter notes ~f:(fun n ->
     let obj = `Assoc (note_json_base n @ [ "snippet", `String (body_snippet n.body) ]) in
     print_endline (Yojson.Safe.to_string obj))
 ;;
 
-(* Full single-note JSON for [show]: raw fields plus the complete [body]. *)
 let print_note_json (n : Db.Note.t) =
   let obj = `Assoc (note_json_base n @ [ "body", `String n.body ]) in
   print_endline (Yojson.Safe.to_string obj)
@@ -359,20 +362,17 @@ let edit_command =
              prerr_endline
                (sprintf "invalid -kind %S (expected journal|note|inbox)" new_kind);
              exit 1);
-           (* Body source: explicit -body/-file, else keep the existing body. *)
            let new_body =
              match body, file with
              | Some b, _ -> b
              | None, Some path -> In_channel.read_all path
              | None, None -> n.body
            in
-           (* New title: -title if given (cleaned), else the note's current title. *)
            let new_title =
              match title with
              | Some _ -> clean title
              | None -> n.title
            in
-           (* tags: given -> replace (possibly clearing to NULL); absent -> keep existing. *)
            let new_metadata =
              match tags with
              | Some csv -> metadata_of_tags csv
@@ -381,8 +381,6 @@ let edit_command =
            let new_slug, new_entry_date =
              match new_kind with
              | "note" ->
-               (* Reuse the old slug only if it was already a note; else derive from the
-                  explicit -slug or the title. *)
                let base =
                  match clean slug with
                  | Some s -> Model.slug_of_title s
@@ -427,9 +425,7 @@ let parse_line_range s =
     (match Int.of_string_opt (String.strip lo), Int.of_string_opt (String.strip hi) with
      | Some lo, Some hi -> Some (lo, hi)
      | _ -> None)
-  | None ->
-    (* A bare "N" is the single-line range N-N. *)
-    Option.map (Int.of_string_opt (String.strip s)) ~f:(fun n -> n, n)
+  | None -> Option.map (Int.of_string_opt (String.strip s)) ~f:(fun n -> n, n)
 ;;
 
 let extract_command =

@@ -174,10 +174,10 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
   in
   let module Chord = struct
     type t =
-      | Arm (* [C-x]: arm the chord *)
+      | Arm
       | Disarm (* any non-chord key: cancel a half-typed [C-x] without leaving Edit *)
-      | Save (* [C-s]: if armed, persist + leave the current mode *)
-      | Cancel (* [C-g]: leave Edit/Extract without saving *)
+      | Save
+      | Cancel
       | Begin_extract
         (* [C-e] (armed, in Edit, mark set): slice the region out of the body and enter
            Extract mode to name the new note. *)
@@ -475,8 +475,6 @@ let app ~(db : Db.t) ~(dimensions : Dimensions.t Bonsai.t) (local_ graph)
             disarm is a no-op when not armed. *)
          | _ -> Effect.all_unit [ inject_chord Disarm; discard (editor_handler event) ])
       | Extract ->
-        (* The editor holds the new note's title. [C-x] [C-s] commits the atomic split;
-           [C-g] aborts back to Browse (the in-memory slice is discarded). *)
         (match event with
          | Key_press { key = ASCII 'G'; mods = [ Ctrl ] } -> inject_chord Cancel
          | Key_press { key = ASCII 'X'; mods = [ Ctrl ] } -> inject_chord Arm
