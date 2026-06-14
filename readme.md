@@ -12,7 +12,15 @@ This is filling a real need for me but also largely just exploring some technolo
 
 ## Develop
 
-Requires the `5.2.0+ox` opam switch. Common tasks are in a `justfile`
+Requires the `5.2.0+ox` opam switch (the [OxCaml](https://oxcaml.org) compiler):
+
+```sh
+opam switch create 5.2.0+ox \
+  --repos ox=git+https://github.com/oxcaml/opam-repository.git,default
+opam install . --deps-only --with-test
+```
+
+Common tasks are in a `justfile`
 ([`just`](https://github.com/casey/just) — `brew install just`); `just` with no
 args lists them.
 

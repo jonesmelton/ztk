@@ -1,6 +1,8 @@
 (executable
  (modes byte exe)
  (name main)
+ (public_name zet)
+ (package zet)
  (libraries zet core_unix.command_unix core)
  (preprocess
   (pps ppx_jane bonsai.ppx_bonsai)))

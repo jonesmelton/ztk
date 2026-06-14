@@ -1,5 +1,6 @@
 (library
  (name zet)
+ (public_name zet)
  (libraries
   async
   bonsai
