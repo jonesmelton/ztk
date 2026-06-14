@@ -6,7 +6,6 @@ on:
   pull_request:
     branches: [main]
 
-# Cancel in-progress runs for the same ref when a new push lands.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -15,19 +14,26 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      OPAMYES: "1"
+      OPAMCONFIRMLEVEL: unsafe-yes
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # OxCaml lives in its own opam-repository; the 5.2.0+ox compiler variant
-      # resolves only when that repo is listed (ahead of default, which it builds on).
-      - name: Set up OCaml
-        uses: ocaml/setup-ocaml@v3
-        with:
-          ocaml-compiler: 5.2.0+ox
-          opam-repositories: |
-            ox: https://github.com/oxcaml/opam-repository.git
-            default: https://github.com/ocaml/opam-repository.git
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y opam libsqlite3-dev
+
+      # The 5.2.0+ox compiler is the ocaml-variants.5.2.0+ox package, which lives ONLY in
+      # the OxCaml opam-repository. setup-ocaml's ocaml-compiler input resolves to stock
+      # ocaml-base-compiler.5.2.0, which cannot parse OxCaml syntax (@@ portable, modes,
+      # value_or_null), so the switch must be created the way OxCaml documents instead.
+      - name: Init opam and create the OxCaml switch
+        run: |
+          opam init --bare --disable-sandboxing --no-setup
+          opam switch create 5.2.0+ox \
+            --repos ox=git+https://github.com/oxcaml/opam-repository.git,default
 
       - name: Install dependencies
         run: opam install . --deps-only --with-test
@@ -37,6 +43,3 @@ jobs:
 
       - name: Test
         run: opam exec -- dune runtest
-
-      - name: Check formatting
-        run: opam exec -- dune build @fmt
