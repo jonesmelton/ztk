@@ -20,6 +20,10 @@ opam switch create 5.2.0+ox \
 opam install . --deps-only --with-test
 ```
 
+CI installs from the committed `zet.opam.locked` (`opam install . --deps-only
+--locked`), which pins the exact transitive closure from a known-good switch.
+Regenerate it after a dependency change with `opam lock .`.
+
 Common tasks are in a `justfile`
 ([`just`](https://github.com/casey/just) — `brew install just`); `just` with no
 args lists them.

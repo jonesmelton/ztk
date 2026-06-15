@@ -35,8 +35,11 @@ jobs:
           opam switch create 5.2.0+ox \
             --repos ox=git+https://github.com/oxcaml/opam-repository.git,default
 
+      # Install from the committed lockfile: exact pinned versions for the whole transitive
+      # closure, so opam skips dependency resolution entirely (the 60s solver timeout that
+      # the unlocked install hit). Versions match the local working switch.
       - name: Install dependencies
-        run: opam install . --deps-only --with-test
+        run: opam install . --deps-only --locked --with-test
 
       - name: Build
         run: opam exec -- dune build @all
